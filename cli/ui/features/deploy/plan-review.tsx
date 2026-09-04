@@ -1,61 +1,418 @@
-import { useState, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import { Badge, Button, Icon, Input } from "@/components/ui/primitives";
 import { DependencyMappings, deploymentMappingError } from "@/features/deploy/dependency-mappings";
 import { connectionProtocols, transitionMappings } from "@/features/deploy/connection-descriptors";
 import { publicSubdomainFromHostname, publicSubdomainSuffix, validatePublicSubdomain } from "@/features/deploy/public-subdomain";
+import { PlanCheck as Check, PlanField as Field, planSelectClass as selectClass } from "@/features/deploy/plan-form-controls";
+import { RuntimeConfigurationEditor } from "@/features/deploy/runtime-configuration-editor";
 import type { DeploymentPlan, ServiceRecord, WorkloadSecretMetadata } from "@/lib/contracts/registry";
+import { getApplicationEffectiveKeys, getUnreviewedApplications, isApplicationConfirmed } from "@/features/deploy/runtime-config";
 
 type Props = {
-  canEdit: boolean; dirty: boolean; plan: DeploymentPlan; quotaBlocked?: boolean; saving: boolean; services: ServiceRecord[];
-  onPlan: (plan: DeploymentPlan) => void; onSave: () => void; onProposal?: () => void;
+  canEdit: boolean;
+  dirty: boolean;
+  plan: DeploymentPlan;
+  quotaBlocked?: boolean;
+  saving: boolean;
+  services: ServiceRecord[];
+  onPlan: (plan: DeploymentPlan) => void;
+  onSave: () => void;
+  onProposal?: () => void;
   onResolveSecret: (applicationID: string, logicalName: string, value: string) => Promise<WorkloadSecretMetadata>;
+  onListSecrets?: (applicationID: string) => Promise<WorkloadSecretMetadata[]>;
 };
 
 export function ApprovalPlanSummary({ children, onProposal, plan }: { children: ReactNode; onProposal?: () => void; plan: DeploymentPlan }) {
   const managedResources = plan.resources.filter((resource) => resource.managed);
   const warnings = plan.issues.filter((issue) => !issue.blocking);
-  return <section aria-labelledby="approval-summary-title" className="border border-outline-variant/30 bg-surface-container p-4 sm:p-5">
-    <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="eyebrow">Plan ready</p><h2 className="text-lg font-semibold" id="approval-summary-title">Ready to deploy</h2><p className="mt-1 text-sm text-on-surface-variant">The detected draft is pinned to the exact commit and connected server.</p></div><div className="flex items-center gap-2">{onProposal && <Button onClick={onProposal} type="button" variant="outline"><Icon name="tune" />Resource proposal</Button>}<Badge>awaiting approval</Badge></div></div>
-    <dl className="mt-4 grid gap-3 border-y border-outline-variant/20 py-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
-      <div><dt className="text-xs uppercase tracking-wide text-on-surface-variant">Source</dt><dd className="mt-1 font-medium">{plan.source.repository}</dd><dd className="font-mono text-xs text-on-surface-variant">{plan.source.commit_sha.slice(0, 12)}</dd></div>
-      <div><dt className="text-xs uppercase tracking-wide text-on-surface-variant">Applications</dt><dd className="mt-1 font-medium">{plan.applications.map((application) => `${application.name}:${application.port}`).join(" · ")}</dd></div>
-      <div><dt className="text-xs uppercase tracking-wide text-on-surface-variant">Managed resources</dt><dd className="mt-1 font-medium">{managedResources.length ? managedResources.map((resource) => resource.logical_name).join(" · ") : "None"}</dd></div>
-      <div><dt className="text-xs uppercase tracking-wide text-on-surface-variant">Target</dt><dd className="mt-1 font-medium">Connected</dd><dd className="font-mono text-xs text-on-surface-variant">{plan.target.node_id || plan.target.runtime_id || "Ready runtime"}</dd></div>
-    </dl>
-    {warnings.length > 0 && <p className="mt-3 text-xs text-on-surface-variant" role="status">{warnings.length} non-blocking notice{warnings.length === 1 ? "" : "s"}: {warnings.map((issue) => issue.message).join(" ")}</p>}
-    <details className="mt-3 border-t border-outline-variant/20 pt-2"><summary className="min-h-10 cursor-pointer py-2 text-sm font-medium text-on-surface-variant">View or edit full detected configuration</summary><div className="mt-3 space-y-4 border-t border-outline-variant/20 pt-4">{children}</div></details>
-  </section>;
+
+  return (
+    <section aria-labelledby="approval-summary-title" className="border border-outline-variant/30 bg-surface-container p-4 sm:p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="eyebrow">Plan ready</p>
+          <h2 className="text-lg font-semibold" id="approval-summary-title">Ready to deploy</h2>
+          <p className="mt-1 text-sm text-on-surface-variant">The detected draft is pinned to the exact commit and connected server.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {onProposal && <Button onClick={onProposal} type="button" variant="outline"><Icon name="tune" />Resource proposal</Button>}
+          <Badge>awaiting approval</Badge>
+        </div>
+      </div>
+      <dl className="mt-4 grid gap-3 border-y border-outline-variant/20 py-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
+        <div>
+          <dt className="text-xs uppercase tracking-wide text-on-surface-variant">Source</dt>
+          <dd className="mt-1 font-medium">{plan.source.repository}</dd>
+          <dd className="font-mono text-xs text-on-surface-variant">{plan.source.commit_sha.slice(0, 12)}</dd>
+        </div>
+        <div>
+          <dt className="text-xs uppercase tracking-wide text-on-surface-variant">Applications</dt>
+          <dd className="mt-1 font-medium">{plan.applications.map((application) => `${application.name}:${application.port}`).join(" · ")}</dd>
+        </div>
+        <div>
+          <dt className="text-xs uppercase tracking-wide text-on-surface-variant">Managed resources</dt>
+          <dd className="mt-1 font-medium">{managedResources.length ? managedResources.map((resource) => resource.logical_name).join(" · ") : "None"}</dd>
+        </div>
+        <div>
+          <dt className="text-xs uppercase tracking-wide text-on-surface-variant">Target</dt>
+          <dd className="mt-1 font-medium">Connected</dd>
+          <dd className="font-mono text-xs text-on-surface-variant">{plan.target.node_id || plan.target.runtime_id || "Ready runtime"}</dd>
+        </div>
+      </dl>
+
+      <div className="mt-4 border-b border-outline-variant/20 pb-4">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-on-surface-variant">Runtime configuration summary</h3>
+        <div className="mt-2 space-y-2">
+          {plan.applications.map((app) => {
+            const keys = getApplicationEffectiveKeys(plan, app);
+            const confirmed = isApplicationConfirmed(plan, app);
+            return (
+              <div key={app.source_key} className="rounded border border-outline-variant/20 bg-surface-container-low p-3 text-sm">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-on-surface">{app.name}</span>
+                  {keys.total === 0 && confirmed ? (
+                    <span className="text-xs text-on-surface-variant font-medium">No keys required — confirmed</span>
+                  ) : keys.total === 0 ? (
+                    <span className="text-xs text-status-warning font-medium">Needs review</span>
+                  ) : (
+                    <span className="text-xs text-on-surface-variant font-medium">{keys.total} runtime {keys.total === 1 ? "key" : "keys"}</span>
+                  )}
+                </div>
+                {keys.total > 0 && (
+                  <ul className="mt-2 space-y-1 text-xs">
+                    {keys.plain.map((p) => (
+                      <li key={p.name} className="flex items-center gap-2">
+                        <code className="font-mono font-medium text-on-surface">{p.name}</code>
+                        <span className="text-on-surface-variant">· Plain variable</span>
+                      </li>
+                    ))}
+                    {keys.secrets.map((s) => (
+                      <li key={`${s.name}-${s.environment_name}`} className="flex items-center gap-2">
+                        <code className="font-mono font-medium text-on-surface">{s.environment_name}</code>
+                        <span className="text-on-surface-variant">· {s.name} · Stored securely · revision {s.revision || 0}</span>
+                      </li>
+                    ))}
+                    {keys.generated.map((g) => (
+                      <li key={g.name} className="flex items-center gap-2">
+                        <code className="font-mono font-medium text-on-surface">{g.name}</code>
+                        <span className="text-on-surface-variant">· Generated · {g.source}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {warnings.length > 0 && (
+        <p className="mt-3 text-xs text-on-surface-variant" role="status">
+          {warnings.length} non-blocking notice{warnings.length === 1 ? "" : "s"}: {warnings.map((issue) => issue.message).join(" ")}
+        </p>
+      )}
+      <details className="mt-3 border-t border-outline-variant/20 pt-2">
+        <summary className="min-h-10 cursor-pointer py-2 text-sm font-medium text-on-surface-variant">
+          View or edit full detected configuration
+        </summary>
+        <div className="mt-3 space-y-4 border-t border-outline-variant/20 pt-4">{children}</div>
+      </details>
+    </section>
+  );
 }
 
-export function PlanReview({ canEdit, dirty, onPlan, onProposal, onResolveSecret, onSave, plan, quotaBlocked = false, saving, services }: Props) {
-  const update = (change: (draft: DeploymentPlan) => void) => { const draft = structuredClone(plan); change(draft); onPlan(draft); };
-	const publicSubdomain = publicSubdomainFromHostname(plan.target.hostname);
-	const publicSubdomainError = plan.target.exposure === "public" ? validatePublicSubdomain(publicSubdomain) : "";
-  return <section aria-labelledby="plan-review-title" className="space-y-6">
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div><h2 className="text-xl font-semibold" id="plan-review-title">Review plan</h2><p className="mt-1 text-sm text-on-surface-variant">Review every detected fact at the exact commit. Repository code was not executed.</p>{quotaBlocked && <p className="mt-2 text-sm text-error" role="alert">Public hostname quota is full. Release a hostname before saving a new label.</p>}</div><div className="flex flex-wrap items-center gap-2">{onProposal && <Button onClick={onProposal} type="button" variant="outline"><Icon name="tune" />Resource proposal</Button>}<Button disabled={!canEdit || saving || !dirty || quotaBlocked || Boolean(publicSubdomainError) || deploymentMappingError(plan.dependencies)} onClick={onSave} variant="secondary">{saving ? "Saving…" : "Save draft"}</Button></div></div>
-    {plan.issues.length > 0 && <div className="space-y-2" role="status">{plan.issues.map((issue, index) => <div className={`border p-3 text-sm ${issue.blocking ? "border-status-failed/40 bg-error-container/10" : "border-status-warning/40 bg-status-warning/10"}`} key={`${issue.code}-${issue.path || index}`}><p className="font-medium">{issue.message}</p>{issue.path && <p className="mt-1 font-mono text-xs text-on-surface-variant">{issue.path}</p>}{issue.resolution && <p className="mt-1 text-on-surface-variant">Next: {issue.resolution}</p>}</div>)}</div>}
+export function PlanReview({ canEdit, dirty, onPlan, onProposal, onResolveSecret, onListSecrets, onSave, plan, quotaBlocked = false, saving, services }: Props) {
+  const update = (change: (draft: DeploymentPlan) => void) => {
+    const draft = structuredClone(plan);
+    change(draft);
+    onPlan(draft);
+  };
+  const publicSubdomain = publicSubdomainFromHostname(plan.target.hostname);
+  const publicSubdomainError = plan.target.exposure === "public" ? validatePublicSubdomain(publicSubdomain) : "";
+  const unreviewedApplications = getUnreviewedApplications(plan);
+  const hasUnreviewed = unreviewedApplications.length > 0;
+  const firstUnreviewedIndex = hasUnreviewed ? plan.applications.findIndex((application) => application.source_key === unreviewedApplications[0].source_key) : -1;
 
-    <fieldset className="space-y-4" disabled={!canEdit || saving}><legend className="text-base font-semibold">Applications</legend>{plan.applications.map((app, index) => <article className="border border-outline-variant/30 bg-surface-container-low p-4" key={`${app.source_key}-${index}`}><div className="flex flex-wrap items-start justify-between gap-2"><div><p className="font-medium">{app.name}</p><p className="text-xs text-on-surface-variant">Source key: <code>{app.source_key}</code></p></div><Confidence value={app.confidence} /></div><div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label="Canonical key"><Input value={app.key} onChange={(event) => update((draft) => { draft.applications[index].key = event.target.value; })} /></Field><Field label="Application root"><Input value={app.root} onChange={(event) => update((draft) => { draft.applications[index].root = event.target.value; draft.applications[index].build.context = event.target.value; })} /></Field><Field label="Build strategy"><select className={selectClass} value={app.build.strategy} onChange={(event) => update((draft) => { draft.applications[index].build.strategy = event.target.value; })}><option value="auto">Auto</option><option value="dockerfile">Dockerfile</option><option value="buildpack">Buildpack</option><option value="image">Existing image</option></select></Field><Field label="Container port"><Input min={1} max={65535} type="number" value={app.port || ""} onChange={(event) => update((draft) => { draft.applications[index].port = Number(event.target.value); })} /></Field><Field label="Dockerfile path"><Input value={app.build.dockerfile_path || ""} onChange={(event) => update((draft) => { draft.applications[index].build.dockerfile_path = event.target.value || undefined; })} /></Field><Field label="Immutable image"><Input placeholder="registry/image@sha256:…" value={app.build.image || ""} onChange={(event) => update((draft) => { draft.applications[index].build.image = event.target.value || undefined; })} /></Field><Field label="CPU request (m)"><Input min={1} type="number" value={app.capacity?.cpu_milli || ""} onChange={(event) => update((draft) => { draft.applications[index].capacity = { ...draft.applications[index].capacity, cpu_milli: optionalNumber(event.target.value) }; })} /></Field><Field label="CPU limit (m)"><Input min={1} type="number" value={app.capacity?.cpu_limit_milli || ""} onChange={(event) => update((draft) => { draft.applications[index].capacity = { ...draft.applications[index].capacity, cpu_limit_milli: optionalNumber(event.target.value) }; })} /></Field><Field label="Memory request (MiB)"><Input min={1} type="number" value={app.capacity?.memory_bytes ? app.capacity.memory_bytes >> 20 : ""} onChange={(event) => update((draft) => { draft.applications[index].capacity = { ...draft.applications[index].capacity, memory_bytes: optionalNumber(event.target.value) ? Number(event.target.value) << 20 : undefined }; })} /></Field><Field label="Memory limit (MiB)"><Input min={1} type="number" value={app.capacity?.memory_limit_bytes ? app.capacity.memory_limit_bytes >> 20 : ""} onChange={(event) => update((draft) => { draft.applications[index].capacity = { ...draft.applications[index].capacity, memory_limit_bytes: optionalNumber(event.target.value) ? Number(event.target.value) << 20 : undefined }; })} /></Field><Field label="Replicas"><Input min={1} type="number" value={app.capacity?.replicas || ""} onChange={(event) => update((draft) => { draft.applications[index].capacity = { ...draft.applications[index].capacity, replicas: optionalNumber(event.target.value) }; })} /></Field><Field label="Exposure"><select className={selectClass} value={app.exposure?.mode || "internal"} onChange={(event) => update((draft) => { draft.applications[index].exposure = { ...draft.applications[index].exposure, mode: event.target.value }; })}><option value="none">None</option><option value="internal">Internal</option><option value="public">Public</option></select></Field><Field label="Service hostname"><Input value={app.exposure?.hostname || ""} onChange={(event) => update((draft) => { draft.applications[index].exposure = { ...draft.applications[index].exposure, hostname: event.target.value || undefined }; })} /></Field></div><Evidence confidence={app.confidence} evidence={app.evidence} reason={app.reason} /></article>)}</fieldset>
+  return (
+    <section aria-labelledby="plan-review-title" className="space-y-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="text-xl font-semibold" id="plan-review-title">Review plan</h2>
+          <p className="mt-1 text-sm text-on-surface-variant">Review every detected fact at the exact commit. Repository code was not executed.</p>
+          {quotaBlocked && <p className="mt-2 text-sm text-error" role="alert">Public hostname quota is full. Release a hostname before saving a new label.</p>}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {onProposal && <Button onClick={onProposal} type="button" variant="outline"><Icon name="tune" />Resource proposal</Button>}
+          <Button
+            disabled={!canEdit || saving || !dirty || quotaBlocked || Boolean(publicSubdomainError) || deploymentMappingError(plan.dependencies) || hasUnreviewed}
+            onClick={onSave}
+          >
+            Save Draft
+          </Button>
+        </div>
+      </div>
 
-    <div className="grid gap-4 lg:grid-cols-2"><fieldset className="space-y-3 border border-outline-variant/30 bg-surface-container-low p-4" disabled={!canEdit || saving}><legend className="px-1 font-semibold">Resources</legend>{plan.resources.length === 0 ? <p className="text-sm text-on-surface-variant">No managed resource detected.</p> : plan.resources.map((resource, index) => <article className="border-t border-outline-variant/30 pt-3 first:border-0 first:pt-0" key={resource.logical_name}><div className="flex items-center justify-between gap-3"><strong>{resource.logical_name}</strong><Confidence value={resource.confidence} /></div><div className="mt-3 grid gap-3 sm:grid-cols-2"><Field label="Type"><select className={selectClass} value={resource.type} onChange={(event) => update((draft) => { draft.resources[index].type = event.target.value; })}><option value="postgres">PostgreSQL</option><option value="redis">Valkey</option><option value="nats">NATS</option><option value="rabbitmq">RabbitMQ</option><option value="kafka">Kafka</option></select></Field><Check checked={resource.managed} label="Managed by Opsi" onChange={(checked) => update((draft) => { draft.resources[index].managed = checked; })} /><Check checked={resource.required} label="Required" onChange={(checked) => update((draft) => { draft.resources[index].required = checked; })} /><Check checked={resource.persistence?.persistent || false} label="Persistent data" onChange={(checked) => update((draft) => { draft.resources[index].persistence = { ...draft.resources[index].persistence, persistent: checked }; })} /><Field label="Storage (GiB)"><Input min={1} type="number" value={resource.persistence?.size_bytes ? resource.persistence.size_bytes >> 30 : ""} onChange={(event) => update((draft) => { draft.resources[index].persistence = { persistent: draft.resources[index].persistence?.persistent || false, ...draft.resources[index].persistence, size_bytes: optionalNumber(event.target.value) ? Number(event.target.value) * 2 ** 30 : undefined }; })} /></Field></div><Evidence confidence={resource.confidence} evidence={resource.evidence} reason={resource.reason} /></article>)}</fieldset>
-      <fieldset className="space-y-3 border border-outline-variant/30 bg-surface-container-low p-4" disabled={!canEdit || saving}><legend className="px-1 font-semibold">Target & failure policy</legend><Field label={`Public subdomain (.${publicSubdomainSuffix})`}><Input aria-invalid={Boolean(publicSubdomainError)} value={publicSubdomain} onChange={(event) => update((draft) => { draft.target.hostname = event.target.value || undefined; })} /></Field>{publicSubdomainError && <p className="text-sm text-error" role="alert">{publicSubdomainError}</p>}<div className="grid gap-3 sm:grid-cols-2"><Field label="Exposure"><select className={selectClass} value={plan.target.exposure} onChange={(event) => update((draft) => { draft.target.exposure = event.target.value; })}><option value="internal">Internal</option><option value="public">Public</option></select></Field><Field label="Max attempts"><Input min={1} max={5} type="number" value={plan.failure_policy.max_attempts} onChange={(event) => update((draft) => { draft.failure_policy.max_attempts = Number(event.target.value); })} /></Field></div>{plan.target.exposure === "public" && <><Check checked={plan.target.public_routes === "automatic"} label="Automatically publish all HTTP applications" onChange={(checked) => update((draft) => { draft.target.public_routes = checked ? "automatic" : "manual"; })} /><p className="text-xs text-on-surface-variant">Automatic routes share one HTTPS hostname: the frontend uses <code>/</code>, same-origin backends use paths such as <code>/api</code>, and other HTTP applications use stable application paths.</p></>}<Check checked={plan.failure_policy.fail_fast} label="Fail fast across services" onChange={(checked) => update((draft) => { draft.failure_policy.fail_fast = checked; })} /><Check checked={plan.failure_policy.rollback_known_good} label="Rollback to exact known-good image" onChange={(checked) => update((draft) => { draft.failure_policy.rollback_known_good = checked; })} /><Check checked={plan.failure_policy.retain_persistent_data} label="Retain persistent data during cleanup" onChange={(checked) => update((draft) => { draft.failure_policy.retain_persistent_data = checked; })} /></fieldset></div>
+      {hasUnreviewed && (
+        <div
+          className="flex flex-col gap-2 border border-status-warning/40 bg-status-warning/10 p-4 text-sm sm:flex-row sm:items-center sm:justify-between"
+          role="alert"
+        >
+          <div className="flex items-center gap-2">
+            <Icon className="text-status-warning" name="warning" />
+            <span>
+              {unreviewedApplications.length === 1
+                ? `Application "${unreviewedApplications[0].name}" requires runtime configuration or confirmation.`
+                : `${unreviewedApplications.length} applications require runtime configuration or confirmation.`}
+            </span>
+          </div>
+          <a
+            className="font-medium text-primary underline underline-offset-4 cursor-pointer"
+            href={`#application-runtime-${firstUnreviewedIndex}`}
+            onClick={(e) => {
+              e.preventDefault();
+              const el = document.getElementById(`application-runtime-${firstUnreviewedIndex}`);
+              el?.scrollIntoView({ behavior: "smooth" });
+              el?.focus();
+            }}
+          >
+            Review {unreviewedApplications[0].name}
+          </a>
+        </div>
+      )}
 
-    <fieldset className="space-y-3" disabled={!canEdit || saving}><legend className="text-base font-semibold">Dependencies & bindings</legend>{plan.dependencies.map((dependency, index) => <article className="border border-outline-variant/30 bg-surface-container-low p-4" key={`${dependency.from}-${dependency.to}-${index}`}><p className="font-medium">{dependency.from} → {dependency.to}</p><div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label="Target"><select className={selectClass} value={dependency.to} onChange={(event) => update((draft) => { draft.dependencies[index].to = event.target.value; })}>{[...plan.applications.map((item) => item.key), ...plan.resources.map((item) => item.logical_name)].map((target) => <option key={target}>{target}</option>)}</select></Field><Field label="Protocol"><select className={selectClass} value={dependency.protocol} onChange={(event) => update((draft) => { const item = draft.dependencies[index]; item.protocol = event.target.value; item.injections = transitionMappings(item.injections || [], item.protocol, item.strategy); })}>{connectionProtocols.map((protocol) => <option key={protocol} value={protocol}>{protocol === "http" ? "HTTP" : protocol === "postgres" ? "PostgreSQL" : protocol === "redis" ? "Redis / Valkey" : "NATS"}</option>)}</select></Field><Field label="Strategy"><Input value={dependency.strategy || ""} onChange={(event) => update((draft) => { const item = draft.dependencies[index]; item.strategy = event.target.value || undefined; item.injections = transitionMappings(item.injections || [], item.protocol, item.strategy); })} /></Field><Field label="Path"><Input placeholder="/api" value={dependency.path || ""} onChange={(event) => update((draft) => { draft.dependencies[index].path = event.target.value || undefined; })} /></Field><DependencyMappings dependencies={plan.dependencies} dependency={dependency} disabled={!canEdit || saving} onChange={(mappings) => update((draft) => { draft.dependencies[index].injections = mappings; })} /><Field label="Verification path"><Input placeholder="/health/dependencies/db" value={dependency.verification?.path || ""} onChange={(event) => update((draft) => { draft.dependencies[index].verification = event.target.value ? { type: "consumer_http", path: event.target.value, expected_status: draft.dependencies[index].verification?.expected_status || 200 } : undefined; })} /></Field><Field label="Expected status"><Input min={100} max={599} type="number" value={dependency.verification?.expected_status || ""} onChange={(event) => update((draft) => { draft.dependencies[index].verification = { type: "consumer_http", path: draft.dependencies[index].verification?.path || "/health", expected_status: Number(event.target.value) }; })} /></Field><Check checked={dependency.required} label="Required" onChange={(checked) => update((draft) => { draft.dependencies[index].required = checked; })} /></div><Evidence confidence={dependency.confidence} evidence={dependency.evidence} reason={dependency.reason} /></article>)}{plan.bindings.map((binding, index) => <article className="border border-outline-variant/30 bg-surface-container-low p-4" key={`${binding.from}-${binding.to}-${index}`}><p className="font-medium">Binding: {binding.from} → {binding.to}</p><div className="mt-3 grid gap-3 sm:grid-cols-3"><Field label="Kind"><select className={selectClass} value={binding.kind} onChange={(event) => update((draft) => { draft.bindings[index].kind = event.target.value; })}><option value="internal_http">Internal HTTP</option><option value="browser_http">Browser / same-origin</option></select></Field><Field label="Same-origin path"><Input placeholder="/api" value={binding.path || ""} onChange={(event) => update((draft) => { draft.bindings[index].path = event.target.value || undefined; })} /></Field></div><Evidence confidence={binding.confidence} evidence={binding.evidence} reason={binding.reason} /></article>)}</fieldset>
+      {plan.issues.length > 0 && (
+        <div className="space-y-2" role="status">
+          {plan.issues.map((issue, index) => (
+            <div
+              className={`border p-3 text-sm ${issue.blocking ? "border-status-failed/40 bg-error-container/10" : "border-status-warning/40 bg-status-warning/10"}`}
+              key={`${issue.code}-${issue.path || index}`}
+            >
+              <p className="font-medium">{issue.message}</p>
+              {issue.path && <p className="mt-1 font-mono text-xs text-on-surface-variant">{issue.path}</p>}
+              {issue.resolution && <p className="mt-1 text-on-surface-variant">Next: {issue.resolution}</p>}
+            </div>
+          ))}
+        </div>
+      )}
 
-    {plan.secrets.length > 0 && <section className="border border-outline-variant/30 bg-surface-container-low p-4"><h3 className="flex items-center gap-2 font-semibold"><Icon name="security" />Secrets</h3><ul className="mt-2 divide-y divide-outline-variant/30">{plan.secrets.map((secret, index) => <SecretEditor applicationID={services.find((item) => item.name === secret.application_key)?.id || secret.application_key} canEdit={canEdit && !saving} key={`${secret.application_key}-${secret.name}`} onResolved={(metadata) => update((draft) => { draft.secrets[index].secret_ref = metadata.reference; draft.secrets[index].revision = metadata.revision; draft.secrets[index].display = "Securely stored"; })} onResolve={onResolveSecret} secret={secret} />)}</ul></section>}
-  </section>;
+      <fieldset className="space-y-4" disabled={!canEdit || saving}>
+        <legend className="text-base font-semibold">Applications</legend>
+        {plan.applications.map((app, index) => (
+          <article className="border border-outline-variant/30 bg-surface-container-low p-4" key={`${app.source_key}-${index}`}>
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <p className="font-medium">{app.name}</p>
+                <p className="text-xs text-on-surface-variant">Source key: <code>{app.source_key}</code></p>
+              </div>
+              <Confidence value={app.confidence} />
+            </div>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <Field label="Canonical key">
+                <Input value={app.key} onChange={(event) => update((draft) => { draft.applications[index].key = event.target.value; })} />
+              </Field>
+              <Field label="Application root">
+                <Input value={app.root} onChange={(event) => update((draft) => { draft.applications[index].root = event.target.value; draft.applications[index].build.context = event.target.value; })} />
+              </Field>
+              <Field label="Build strategy">
+                <select className={selectClass} value={app.build.strategy} onChange={(event) => update((draft) => { draft.applications[index].build.strategy = event.target.value; })}>
+                  <option value="auto">Auto</option>
+                  <option value="dockerfile">Dockerfile</option>
+                  <option value="buildpack">Buildpack</option>
+                  <option value="image">Existing image</option>
+                </select>
+              </Field>
+              <Field label="Container port">
+                <Input min={1} max={65535} type="number" value={app.port || ""} onChange={(event) => update((draft) => { draft.applications[index].port = Number(event.target.value); })} />
+              </Field>
+              <Field label="Dockerfile path">
+                <Input value={app.build.dockerfile_path || ""} onChange={(event) => update((draft) => { draft.applications[index].build.dockerfile_path = event.target.value || undefined; })} />
+              </Field>
+              <Field label="Immutable image">
+                <Input placeholder="registry/image@sha256:…" value={app.build.image || ""} onChange={(event) => update((draft) => { draft.applications[index].build.image = event.target.value || undefined; })} />
+              </Field>
+              <Field label="CPU request (m)">
+                <Input min={1} type="number" value={app.capacity?.cpu_milli || ""} onChange={(event) => update((draft) => { draft.applications[index].capacity = { ...draft.applications[index].capacity, cpu_milli: optionalNumber(event.target.value) }; })} />
+              </Field>
+              <Field label="CPU limit (m)">
+                <Input min={1} type="number" value={app.capacity?.cpu_limit_milli || ""} onChange={(event) => update((draft) => { draft.applications[index].capacity = { ...draft.applications[index].capacity, cpu_limit_milli: optionalNumber(event.target.value) }; })} />
+              </Field>
+              <Field label="Memory request (MiB)">
+                <Input min={1} type="number" value={app.capacity?.memory_bytes ? app.capacity.memory_bytes >> 20 : ""} onChange={(event) => update((draft) => { draft.applications[index].capacity = { ...draft.applications[index].capacity, memory_bytes: optionalNumber(event.target.value) ? Number(event.target.value) << 20 : undefined }; })} />
+              </Field>
+              <Field label="Memory limit (MiB)">
+                <Input min={1} type="number" value={app.capacity?.memory_limit_bytes ? app.capacity.memory_limit_bytes >> 20 : ""} onChange={(event) => update((draft) => { draft.applications[index].capacity = { ...draft.applications[index].capacity, memory_limit_bytes: optionalNumber(event.target.value) ? Number(event.target.value) << 20 : undefined }; })} />
+              </Field>
+              <Field label="Replicas">
+                <Input min={1} type="number" value={app.capacity?.replicas || ""} onChange={(event) => update((draft) => { draft.applications[index].capacity = { ...draft.applications[index].capacity, replicas: optionalNumber(event.target.value) }; })} />
+              </Field>
+              <Field label="Exposure">
+                <select className={selectClass} value={app.exposure?.mode || "internal"} onChange={(event) => update((draft) => { draft.applications[index].exposure = { ...draft.applications[index].exposure, mode: event.target.value }; })}>
+                  <option value="none">None</option>
+                  <option value="internal">Internal</option>
+                  <option value="public">Public</option>
+                </select>
+              </Field>
+              <Field label="Service hostname">
+                <Input value={app.exposure?.hostname || ""} onChange={(event) => update((draft) => { draft.applications[index].exposure = { ...draft.applications[index].exposure, hostname: event.target.value || undefined }; })} />
+              </Field>
+            </div>
+
+            <RuntimeConfigurationEditor
+              application={app}
+              applicationIndex={index}
+              canEdit={canEdit && !saving}
+              listSecrets={onListSecrets}
+              resolveSecret={onResolveSecret}
+              plan={plan}
+              services={services}
+              update={update}
+            />
+
+            <Evidence confidence={app.confidence} evidence={app.evidence} reason={app.reason} />
+          </article>
+        ))}
+      </fieldset>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <fieldset className="space-y-3 border border-outline-variant/30 bg-surface-container-low p-4" disabled={!canEdit || saving}>
+          <legend className="px-1 font-semibold">Resources</legend>
+          {plan.resources.length === 0 ? (
+            <p className="text-sm text-on-surface-variant">No managed resource detected.</p>
+          ) : (
+            plan.resources.map((resource, index) => (
+              <article className="border-t border-outline-variant/30 pt-3 first:border-0 first:pt-0" key={resource.logical_name}>
+                <div className="flex items-center justify-between gap-3">
+                  <strong>{resource.logical_name}</strong>
+                  <Confidence value={resource.confidence} />
+                </div>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <Field label="Type">
+                    <select className={selectClass} value={resource.type} onChange={(event) => update((draft) => { draft.resources[index].type = event.target.value; })}>
+                      <option value="postgres">PostgreSQL</option>
+                      <option value="redis">Valkey</option>
+                      <option value="nats">NATS</option>
+                      <option value="rabbitmq">RabbitMQ</option>
+                      <option value="kafka">Kafka</option>
+                    </select>
+                  </Field>
+                  <Check checked={resource.managed} label="Managed by Opsi" onChange={(checked) => update((draft) => { draft.resources[index].managed = checked; })} />
+                  <Check checked={resource.required} label="Required" onChange={(checked) => update((draft) => { draft.resources[index].required = checked; })} />
+                  <Check checked={resource.persistence?.persistent || false} label="Persistent data" onChange={(checked) => update((draft) => { draft.resources[index].persistence = { ...draft.resources[index].persistence, persistent: checked }; })} />
+                  <Field label="Storage (GiB)">
+                    <Input min={1} type="number" value={resource.persistence?.size_bytes ? resource.persistence.size_bytes >> 30 : ""} onChange={(event) => update((draft) => { draft.resources[index].persistence = { persistent: draft.resources[index].persistence?.persistent || false, ...draft.resources[index].persistence, size_bytes: optionalNumber(event.target.value) ? Number(event.target.value) * 2 ** 30 : undefined }; })} />
+                  </Field>
+                </div>
+                <Evidence confidence={resource.confidence} evidence={resource.evidence} reason={resource.reason} />
+              </article>
+            ))
+          )}
+        </fieldset>
+
+        <fieldset className="space-y-3 border border-outline-variant/30 bg-surface-container-low p-4" disabled={!canEdit || saving}>
+          <legend className="px-1 font-semibold">Target & failure policy</legend>
+          <Field label={`Public subdomain (.${publicSubdomainSuffix})`}>
+            <Input aria-invalid={Boolean(publicSubdomainError)} value={publicSubdomain} onChange={(event) => update((draft) => { draft.target.hostname = event.target.value || undefined; })} />
+          </Field>
+          {publicSubdomainError && <p className="text-sm text-error" role="alert">{publicSubdomainError}</p>}
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Exposure">
+              <select className={selectClass} value={plan.target.exposure} onChange={(event) => update((draft) => { draft.target.exposure = event.target.value; })}>
+                <option value="internal">Internal</option>
+                <option value="public">Public</option>
+              </select>
+            </Field>
+            <Field label="Max attempts">
+              <Input min={1} max={5} type="number" value={plan.failure_policy.max_attempts} onChange={(event) => update((draft) => { draft.failure_policy.max_attempts = Number(event.target.value); })} />
+            </Field>
+          </div>
+          {plan.target.exposure === "public" && (
+            <>
+              <Check checked={plan.target.public_routes === "automatic"} label="Automatically publish all HTTP applications" onChange={(checked) => update((draft) => { draft.target.public_routes = checked ? "automatic" : "manual"; })} />
+              <p className="text-xs text-on-surface-variant">Automatic routes share one HTTPS hostname: the frontend uses <code>/</code>, same-origin backends use paths such as <code>/api</code>, and other HTTP applications use stable application paths.</p>
+            </>
+          )}
+          <Check checked={plan.failure_policy.fail_fast} label="Fail fast across services" onChange={(checked) => update((draft) => { draft.failure_policy.fail_fast = checked; })} />
+          <Check checked={plan.failure_policy.rollback_known_good} label="Rollback to exact known-good image" onChange={(checked) => update((draft) => { draft.failure_policy.rollback_known_good = checked; })} />
+          <Check checked={plan.failure_policy.retain_persistent_data} label="Retain persistent data during cleanup" onChange={(checked) => update((draft) => { draft.failure_policy.retain_persistent_data = checked; })} />
+        </fieldset>
+      </div>
+
+      <fieldset className="space-y-3" disabled={!canEdit || saving}>
+        <legend className="text-base font-semibold">Dependencies & bindings</legend>
+        {plan.dependencies.map((dependency, index) => (
+          <article className="border border-outline-variant/30 bg-surface-container-low p-4" key={`${dependency.from}-${dependency.to}-${index}`}>
+            <p className="font-medium">{dependency.from} → {dependency.to}</p>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <Field label="Target">
+                <select className={selectClass} value={dependency.to} onChange={(event) => update((draft) => { draft.dependencies[index].to = event.target.value; })}>
+                  {[...plan.applications.map((item) => item.key), ...plan.resources.map((item) => item.logical_name)].map((target) => <option key={target}>{target}</option>)}
+                </select>
+              </Field>
+              <Field label="Protocol">
+                <select className={selectClass} value={dependency.protocol} onChange={(event) => update((draft) => { const item = draft.dependencies[index]; item.protocol = event.target.value; item.injections = transitionMappings(item.injections || [], item.protocol, item.strategy); })}>
+                  {connectionProtocols.map((protocol) => <option key={protocol} value={protocol}>{protocol === "http" ? "HTTP" : protocol === "postgres" ? "PostgreSQL" : protocol === "redis" ? "Redis / Valkey" : "NATS"}</option>)}
+                </select>
+              </Field>
+              <Field label="Strategy">
+                <Input value={dependency.strategy || ""} onChange={(event) => update((draft) => { const item = draft.dependencies[index]; item.strategy = event.target.value || undefined; item.injections = transitionMappings(item.injections || [], item.protocol, item.strategy); })} />
+              </Field>
+              <Field label="Path">
+                <Input placeholder="/api" value={dependency.path || ""} onChange={(event) => update((draft) => { draft.dependencies[index].path = event.target.value || undefined; })} />
+              </Field>
+              <DependencyMappings dependencies={plan.dependencies} dependency={dependency} disabled={!canEdit || saving} onChange={(mappings) => update((draft) => { draft.dependencies[index].injections = mappings; })} />
+              <Field label="Verification path">
+                <Input placeholder="/health/dependencies/db" value={dependency.verification?.path || ""} onChange={(event) => update((draft) => { draft.dependencies[index].verification = event.target.value ? { type: "consumer_http", path: event.target.value, expected_status: draft.dependencies[index].verification?.expected_status || 200 } : undefined; })} />
+              </Field>
+              <Field label="Expected status">
+                <Input min={100} max={599} type="number" value={dependency.verification?.expected_status || ""} onChange={(event) => update((draft) => { draft.dependencies[index].verification = { type: "consumer_http", path: draft.dependencies[index].verification?.path || "/health", expected_status: Number(event.target.value) }; })} />
+              </Field>
+              <Check checked={dependency.required} label="Required" onChange={(checked) => update((draft) => { draft.dependencies[index].required = checked; })} />
+            </div>
+            <Evidence confidence={dependency.confidence} evidence={dependency.evidence} reason={dependency.reason} />
+          </article>
+        ))}
+        {plan.bindings.map((binding, index) => (
+          <article className="border border-outline-variant/30 bg-surface-container-low p-4" key={`${binding.from}-${binding.to}-${index}`}>
+            <p className="font-medium">Binding: {binding.from} → {binding.to}</p>
+            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+              <Field label="Kind">
+                <select className={selectClass} value={binding.kind} onChange={(event) => update((draft) => { draft.bindings[index].kind = event.target.value; })}>
+                  <option value="internal_http">Internal HTTP</option>
+                  <option value="browser_http">Browser / same-origin</option>
+                </select>
+              </Field>
+              <Field label="Same-origin path">
+                <Input placeholder="/api" value={binding.path || ""} onChange={(event) => update((draft) => { draft.bindings[index].path = event.target.value || undefined; })} />
+              </Field>
+            </div>
+            <Evidence confidence={binding.confidence} evidence={binding.evidence} reason={binding.reason} />
+          </article>
+        ))}
+      </fieldset>
+    </section>
+  );
 }
 
-function SecretEditor({ applicationID, canEdit, onResolve, onResolved, secret }: { applicationID: string; canEdit: boolean; onResolve: Props["onResolveSecret"]; onResolved: (metadata: WorkloadSecretMetadata) => void; secret: DeploymentPlan["secrets"][number] }) {
-  const [value, setValue] = useState(""); const [busy, setBusy] = useState(false); const [error, setError] = useState("");
-  if (secret.generated) return <li className="flex items-center justify-between gap-3 py-3 text-sm"><span><strong>{secret.name}</strong><span className="block text-xs text-on-surface-variant">{secret.application_key} · {secret.environment_name}</span></span><span className="flex items-center gap-2 text-status-ready"><Icon name="check" />Generated and securely stored</span></li>;
-  async function submit() { if (!value) return; const submitted = value; setValue(""); setBusy(true); setError(""); try { onResolved(await onResolve(applicationID, secret.name, submitted)); } catch (cause) { setError((cause as Error).message); } finally { setBusy(false); } }
-  return <li className="py-3"><div className="flex flex-col gap-3 sm:flex-row sm:items-end"><div className="flex-1"><p className="text-sm font-medium">{secret.name}</p><p className="text-xs text-on-surface-variant">{secret.secret_ref ? `Reference revision ${secret.revision}` : "Enter once; the value is never returned."}</p><label className="sr-only" htmlFor={`secret-${secret.application_key}-${secret.name}`}>Value for {secret.name}</label><Input autoComplete="new-password" disabled={!canEdit || busy} id={`secret-${secret.application_key}-${secret.name}`} onChange={(event) => setValue(event.target.value)} type="password" value={value} /></div><Button disabled={!canEdit || !value || busy} onClick={() => void submit()} variant="secondary">{busy ? "Storing…" : "Store securely"}</Button></div>{error && <p className="mt-2 text-sm text-error" role="alert">{error}</p>}</li>;
+function Confidence({ value }: { value: string }) {
+  return <Badge>{value || "unknown"} confidence</Badge>;
 }
 
-function Field({ children, label }: { children: React.ReactNode; label: string }) { return <label className="grid content-start gap-1 text-sm"><span className="font-medium">{label}</span>{children}</label>; }
-function Check({ checked, label, onChange }: { checked: boolean; label: string; onChange: (checked: boolean) => void }) { return <label className="flex min-h-10 items-center gap-2 text-sm"><input checked={checked} className="h-4 w-4 accent-primary" onChange={(event) => onChange(event.target.checked)} type="checkbox" />{label}</label>; }
-function Confidence({ value }: { value: string }) { return <Badge>{value || "unknown"} confidence</Badge>; }
-function Evidence({ confidence, evidence, reason }: { confidence: string; evidence: DeploymentPlan["applications"][number]["evidence"]; reason: string }) { return <details className="mt-3 text-xs text-on-surface-variant"><summary className="cursor-pointer min-h-10 py-2">Why Opsi detected this · {confidence}</summary><p>{reason}</p><ul className="mt-2 space-y-1">{evidence.map((item, index) => <li key={`${item.path}-${item.kind}-${index}`}><code>{item.path}</code> · {item.reason}</li>)}</ul></details>; }
-function optionalNumber(value: string) { return value === "" ? undefined : Number(value); }
-const selectClass = "min-h-10 w-full border border-outline-variant/40 bg-surface-container-lowest px-3 text-sm text-on-surface focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary";
+function Evidence({ confidence, evidence, reason }: { confidence: string; evidence: DeploymentPlan["applications"][number]["evidence"]; reason: string }) {
+  return (
+    <details className="mt-3 text-xs text-on-surface-variant">
+      <summary className="cursor-pointer min-h-10 py-2">Why Opsi detected this · {confidence}</summary>
+      <p>{reason}</p>
+      <ul className="mt-2 space-y-1">
+        {evidence.map((item, index) => (
+          <li key={`${item.path}-${item.kind}-${index}`}>
+            <code>{item.path}</code> · {item.reason}
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+function optionalNumber(value: string) {
+  return value === "" ? undefined : Number(value);
+}

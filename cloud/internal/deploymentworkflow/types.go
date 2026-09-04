@@ -22,10 +22,12 @@ import (
 )
 
 const (
-	PlanSchemaVersion       = "opsi.deployment_plan/v2"
-	RunSchemaVersion        = "opsi.deployment_run/v2"
-	legacyPlanSchemaVersion = "opsi.deployment_plan/v1"
-	legacyRunSchemaVersion  = "opsi.deployment_run/v1"
+	PlanSchemaVersion         = "opsi.deployment_plan/v3"
+	RunSchemaVersion          = "opsi.deployment_run/v3"
+	legacyPlanV2SchemaVersion = "opsi.deployment_plan/v2"
+	legacyRunV2SchemaVersion  = "opsi.deployment_run/v2"
+	legacyPlanV1SchemaVersion = "opsi.deployment_plan/v1"
+	legacyRunV1SchemaVersion  = "opsi.deployment_run/v1"
 )
 
 type State string
@@ -92,26 +94,30 @@ type FailurePolicy struct {
 	RetainPersistentData bool `json:"retain_persistent_data"`
 	MaxAttempts          int  `json:"max_attempts"`
 }
-
-type Plan struct {
-	SchemaVersion     string                              `json:"schema_version"`
-	Hash              string                              `json:"hash"`
-	Source            Source                              `json:"source"`
-	Applications      []repositoryanalysis.Application    `json:"applications"`
-	Resources         []repositoryanalysis.Resource       `json:"resources"`
-	Dependencies      []repositoryanalysis.Dependency     `json:"dependencies"`
-	Bindings          []repositoryanalysis.Binding        `json:"bindings"`
-	Secrets           []repositoryanalysis.Secret         `json:"secrets"`
-	Issues            []repositoryanalysis.Issue          `json:"issues"`
-	AnalysisScope     repositoryanalysis.Scope            `json:"analysis_scope"`
-	AnalysisScopeHash string                              `json:"analysis_scope_hash"`
-	EvidenceCoverage  repositoryanalysis.EvidenceCoverage `json:"evidence_coverage"`
-	TruncationReason  string                              `json:"truncation_reason,omitempty"`
-	Target            Target                              `json:"target"`
-	Authority         AuthorityRevisions                  `json:"authority_revisions"`
-	FailurePolicy     FailurePolicy                       `json:"failure_policy"`
+type ApplicationEnvironmentReview struct {
+	ApplicationSourceKey  string `json:"application_source_key"`
+	NoEnvironmentRequired bool   `json:"no_environment_required"`
 }
 
+type Plan struct {
+	SchemaVersion                 string                              `json:"schema_version"`
+	Hash                          string                              `json:"hash"`
+	Source                        Source                              `json:"source"`
+	Applications                  []repositoryanalysis.Application    `json:"applications"`
+	Resources                     []repositoryanalysis.Resource       `json:"resources"`
+	Dependencies                  []repositoryanalysis.Dependency     `json:"dependencies"`
+	Bindings                      []repositoryanalysis.Binding        `json:"bindings"`
+	Secrets                       []repositoryanalysis.Secret         `json:"secrets"`
+	ApplicationEnvironmentReviews []ApplicationEnvironmentReview      `json:"application_environment_reviews,omitempty"`
+	Issues                        []repositoryanalysis.Issue          `json:"issues"`
+	AnalysisScope                 repositoryanalysis.Scope            `json:"analysis_scope"`
+	AnalysisScopeHash             string                              `json:"analysis_scope_hash"`
+	EvidenceCoverage              repositoryanalysis.EvidenceCoverage `json:"evidence_coverage"`
+	TruncationReason              string                              `json:"truncation_reason,omitempty"`
+	Target                        Target                              `json:"target"`
+	Authority                     AuthorityRevisions                  `json:"authority_revisions"`
+	FailurePolicy                 FailurePolicy                       `json:"failure_policy"`
+}
 type Approval struct {
 	Actor              string             `json:"actor"`
 	PlanHash           string             `json:"plan_hash"`
@@ -319,6 +325,9 @@ func HashPlan(plan Plan) (string, error) {
 	for i := range copy.Secrets {
 		sortEvidence(copy.Secrets[i].Evidence)
 	}
+	sort.Slice(copy.ApplicationEnvironmentReviews, func(i, j int) bool {
+		return copy.ApplicationEnvironmentReviews[i].ApplicationSourceKey < copy.ApplicationEnvironmentReviews[j].ApplicationSourceKey
+	})
 	sort.Slice(copy.Issues, func(i, j int) bool {
 		return copy.Issues[i].Code+"\x00"+copy.Issues[i].Path+"\x00"+copy.Issues[i].Message < copy.Issues[j].Code+"\x00"+copy.Issues[j].Path+"\x00"+copy.Issues[j].Message
 	})
@@ -372,11 +381,6 @@ func ValidatePlan(plan Plan) error {
 			hostname, err := exposurev1.NormalizeHostname(application.Exposure.Hostname)
 			if err != nil || hostname != application.Exposure.Hostname {
 				return errors.New("deployment plan application hostname is invalid")
-			}
-		}
-		for name, value := range application.Environment {
-			if deploymentv1.IsSecretLikeEnvironmentName(name) || strings.ContainsAny(value, "\x00\r\n") {
-				return errors.New("deployment plan environment contains secret-like or invalid data")
 			}
 		}
 	}
@@ -459,12 +463,18 @@ func ValidatePlan(plan Plan) error {
 		}
 	}
 	for _, secret := range plan.Secrets {
+		if !deploymentv1.IsValidEnvironmentName(secret.EnvironmentName) {
+			return errors.New("deployment plan secret environment name is invalid")
+		}
 		if secret.Generated && (!strings.HasPrefix(secret.SecretRef, "generated://") || secret.Display != "Generated and securely stored" || secret.ApplicationKey == "" || secret.EnvironmentName == "") {
 			return errors.New("generated secret must contain only a symbolic reference")
 		}
-		if !applications[secret.ApplicationKey] || secret.Name == "" || secret.EnvironmentName == "" || !secret.Generated && strings.ContainsAny(secret.SecretRef, "\x00\r\n") {
+		if !applications[secret.ApplicationKey] || secret.Name == "" || secret.EnvironmentName == "" || (!secret.Generated && strings.ContainsAny(secret.SecretRef, "\x00\r\n")) {
 			return errors.New("deployment plan secret reference is invalid")
 		}
+	}
+	if err := validateApplicationRuntimeConfiguration(plan); err != nil {
+		return err
 	}
 	expected, err := HashPlan(plan)
 	if err != nil || plan.Hash != expected {
@@ -480,11 +490,17 @@ func Runnable(state State) bool {
 	return state == StateProvisioning || state == StateBuilding || state == StatePreflighting || state == StateDeploying || state == StateVerifying || state == StateRollingBack || state == StateCleaningUp
 }
 
-// normalizeStoredRun is the one-way v1 read migration. Old nonterminal runs
-// can never enter the v2 controller because their approval did not cover the
-// expanded plan hash. Terminal history is projected into the v2 read shape.
+// normalizeStoredRun is the one-way v1/v2 read migration. Old nonterminal runs
+// cannot enter the v3 controller because their approval did not cover the
+// application environment review. Terminal history is projected for reads
+// without fabricating a user confirmation.
 func normalizeStoredRun(run Run) Run {
-	if run.Plan.SchemaVersion != legacyPlanSchemaVersion && run.SchemaVersion != legacyRunSchemaVersion {
+	if run.Plan.SchemaVersion == PlanSchemaVersion && run.SchemaVersion == RunSchemaVersion {
+		return run
+	}
+	isV1 := run.Plan.SchemaVersion == legacyPlanV1SchemaVersion || run.SchemaVersion == legacyRunV1SchemaVersion
+	isV2 := run.Plan.SchemaVersion == legacyPlanV2SchemaVersion || run.SchemaVersion == legacyRunV2SchemaVersion
+	if !isV1 && !isV2 {
 		return run
 	}
 	originalState := run.State
@@ -494,7 +510,13 @@ func normalizeStoredRun(run Run) Run {
 		run.State = StateStale
 		run.Approval = nil
 		run.WarningAcknowledgement = nil
-		run.Failure = &Failure{Step: originalState, Code: "DEPLOYMENT_PLAN_V1_STALE", Message: "This run used deployment plan v1 and must be analyzed and reviewed again.", NextAction: "Analyze and review the repository again.", Retryable: false}
+		code := "DEPLOYMENT_PLAN_V2_STALE"
+		message := "This run used deployment plan v2 and must be analyzed and reviewed again."
+		if isV1 {
+			code = "DEPLOYMENT_PLAN_V1_STALE"
+			message = "This run used deployment plan v1 and must be analyzed and reviewed again."
+		}
+		run.Failure = &Failure{Step: originalState, Code: code, Message: message, NextAction: "Analyze and review the repository again.", Retryable: false}
 	}
 	_ = func() error {
 		hash, err := HashPlan(run.Plan)

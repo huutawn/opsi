@@ -1,4 +1,5 @@
 import { DeployView } from "@/features/deploy/deploy-view";
+import { AssistantView } from "@/features/assistant/assistant-view";
 import { ObservabilityView } from "@/features/observability/observability-view";
 import { SecurityView } from "@/features/security/security-view";
 import { SettingsView } from "@/features/settings/settings-view";
@@ -9,6 +10,7 @@ import type { ConsoleController } from "@/features/console/types";
 
 export const coreViewMap = {
   deploy: DeployView,
+  assistant: AssistantView,
 } as const;
 
 const tabViewMap: Record<string, Record<string, (props: { console: ConsoleController }) => React.ReactNode>> = {

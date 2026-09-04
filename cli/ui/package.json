@@ -9,9 +9,9 @@
     "npm": "11.17.0"
   },
   "scripts": {
-    "test": "node --test features/**/*.test.mjs design-system.test.mjs",
+    "test": "node --test features/**/*.test.mjs lib/**/*.test.mjs design-system.test.mjs",
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint"
   },

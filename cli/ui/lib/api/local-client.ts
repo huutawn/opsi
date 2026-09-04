@@ -32,6 +32,7 @@ import type {
   IncidentListResult,
   IncidentEvidence,
   SupportSummary,
+  ProjectAgentConnection,
   TelemetryQueryResponse,
   TelemetrySummary,
   TimelineEvent,
@@ -146,17 +147,91 @@ export type AssistantProvider = {
   capabilities: string[]; data_boundary: string; message?: string;
 };
 
+export type AssistantGrounding = {
+  status: "verified" | "failed" | "unverified";
+  successful_tool_calls: number;
+  tools: string[];
+};
+
 export type AssistantConfigurationProposal = {
   application_id: string; application_name: string; environment_id: string; rationale: string;
   expected_revision: number; expected_state_hash: string; analysis_inputs_hash: string; draft_json: string;
 };
+export type AssistantSourcePatchProposal = {
+  project_id: string; environment_id: string; application_id: string; source_commit: string;
+  application_root: string; proposal_hash: string; validation_status: "VALID" | "VALID_WITH_WARNINGS";
+  proposal: { rationale?: { observed_source?: string; opsi_facts?: string; inference?: string }; files?: Array<{ path: string; base_blob_sha: string; unified_diff: string }> };
+};
+export type SourcePatchApplyReceipt = { status: string; reused?: boolean; proposal_hash: string; source_commit: string; changed_files: string[]; journal_id?: string; applied_at: string };
 
-export type AssistantTurn = {
-  id: string; conversation_id: string; provider_id: string; project_id: string;
-  state: "running" | "succeeded" | "failed"; response?: string; error?: string;
-  proposals?: AssistantConfigurationProposal[]; started_at: string; finished_at?: string;
+export type AssistantProgressEvent = {
+  sequence: number;
+  timestamp: string;
+  phase: string;
+  tool?: string;
+  code?: string;
+  summary: string;
 };
 
+export type AssistantTurn = {
+  id: string;
+  conversation_id: string;
+  provider_id: string;
+  project_id: string;
+  state: "running" | "succeeded" | "failed";
+  response?: string;
+  error?: string;
+  error_code?: string;
+  diagnostic_code?: string;
+  retryable?: boolean;
+  next_action?: string;
+  progress?: AssistantProgressEvent[];
+  history_error?: string;
+  grounding?: AssistantGrounding;
+  configuration_proposals?: AssistantConfigurationProposal[];
+  source_patch_proposals?: AssistantSourcePatchProposal[];
+  started_at: string;
+  finished_at?: string;
+};
+
+export type AssistantConversationSummary = {
+  id: string;
+  project_id: string;
+  provider_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+  last_turn_state?: string;
+};
+
+export type AssistantStoredMessage = {
+  id: string;
+  turn_id: string;
+  role: "user" | "assistant";
+  text: string;
+  redacted?: boolean;
+  grounding?: AssistantGrounding;
+  configuration_proposals?: AssistantConfigurationProposal[];
+  source_patch_proposals?: AssistantSourcePatchProposal[];
+  progress?: AssistantProgressEvent[];
+  error_code?: string;
+  diagnostic_code?: string;
+  error?: string;
+  next_action?: string;
+  state?: string;
+  created_at: string;
+};
+
+export type AssistantConversationDetail = {
+  id: string;
+  project_id: string;
+  provider_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  messages: AssistantStoredMessage[];
+};
 export class LocalClient {
   private localSession = "";
 
@@ -226,7 +301,7 @@ export class LocalClient {
   }
 
   assistantProviders() {
-    return this.call<{ providers: AssistantProvider[]; mcp_surface: string }>("/api/local/ai/providers");
+    return this.call<{ providers: AssistantProvider[]; mcp_surface: string; history_available: boolean }>("/api/local/ai/providers");
   }
 
   startAssistantTurn(projectID: string, body: { provider_id?: string; conversation_id?: string; prompt: string }, idempotencyKey?: string) {
@@ -237,6 +312,33 @@ export class LocalClient {
 
   assistantTurn(projectID: string, turnID: string) {
     return this.call<AssistantTurn>(`/api/local/projects/${encodeURIComponent(projectID)}/assistant/turns/${encodeURIComponent(turnID)}`);
+  }
+  retryAssistantTurn(projectID: string, turnID: string, idempotencyKey?: string) {
+    return this.call<AssistantTurn>(`/api/local/projects/${encodeURIComponent(projectID)}/assistant/turns/${encodeURIComponent(turnID)}/retry`, {
+      method: "POST", write: true, idempotencyKey,
+    });
+  }
+
+  assistantConversations(projectID: string, providerID?: string) {
+    const query = providerID ? `?provider_id=${encodeURIComponent(providerID)}` : "";
+    return this.call<{ conversations: AssistantConversationSummary[] }>(`/api/local/projects/${encodeURIComponent(projectID)}/assistant/conversations${query}`);
+  }
+
+  assistantConversation(projectID: string, conversationID: string) {
+    return this.call<AssistantConversationDetail>(`/api/local/projects/${encodeURIComponent(projectID)}/assistant/conversations/${encodeURIComponent(conversationID)}`);
+  }
+
+  deleteAssistantConversation(projectID: string, conversationID: string) {
+    return this.call<{ deleted: boolean; conversation_id: string }>(`/api/local/projects/${encodeURIComponent(projectID)}/assistant/conversations/${encodeURIComponent(conversationID)}`, {
+      method: "DELETE", write: true,
+    });
+  }
+
+  applyAssistantSourcePatch(projectID: string, turnID: string, proposalHash: string, expectedSourceCommit: string, idempotencyKey?: string) {
+    return this.call<SourcePatchApplyReceipt>(`/api/local/projects/${encodeURIComponent(projectID)}/assistant/turns/${encodeURIComponent(turnID)}/source-patches/${encodeURIComponent(proposalHash)}/apply`, {
+      method: "POST", write: true, idempotencyKey,
+      body: JSON.stringify({ confirmed_proposal_hash: proposalHash, expected_source_commit: expectedSourceCommit }),
+    });
   }
 
   async projects(orgID: string) {
@@ -633,24 +735,26 @@ export class LocalClient {
   support(projectID: string) {
     return this.call<SupportSummary>(`/api/local/projects/${projectID}/support`);
   }
-
-  telemetrySummary(projectID: string, sinceUnix = 0) {
+  projectAgentConnection(projectID: string) {
+    return this.call<ProjectAgentConnection>(`/api/local/projects/${encodeURIComponent(projectID)}/agent-connection`);
+  }
+  telemetrySummary(projectID: string, sinceUnix = 0, window = "") {
+    const query = new URLSearchParams();
+    if (sinceUnix > 0) query.set("since_unix", String(sinceUnix));
+    if (window) query.set("window", window);
+    const suffix = query.toString() ? `?${query.toString()}` : "";
     return this.call<TelemetrySummary>(
-      `/api/local/projects/${projectID}/telemetry/summary?since_unix=${encodeURIComponent(String(sinceUnix))}`,
+      `/api/local/projects/${projectID}/telemetry/summary${suffix}`,
     );
   }
 
-  telemetryService(projectID: string, serviceID: string, sinceUnix = 0) {
-    return this.call<TelemetryQueryResponse>(
-      `/api/local/projects/${projectID}/telemetry/services/${encodeURIComponent(serviceID)}?since_unix=${encodeURIComponent(String(sinceUnix))}`,
-    );
-  }
-
-  logs(projectID: string, params: { serviceID?: string; cursor?: string; limit?: number } = {}) {
+  logs(projectID: string, params: { serviceID?: string; cursor?: string; limit?: number; sinceUnix?: number; window?: string } = {}) {
     const query = new URLSearchParams();
     if (params.serviceID) query.set("service_id", params.serviceID);
     if (params.cursor) query.set("cursor", params.cursor);
     if (params.limit) query.set("limit", String(params.limit));
+    if (params.sinceUnix && params.sinceUnix > 0) query.set("since_unix", String(params.sinceUnix));
+    if (params.window) query.set("window", params.window);
     const suffix = query.toString() ? `?${query.toString()}` : "";
     return this.call<TelemetryQueryResponse>(`/api/local/projects/${projectID}/logs${suffix}`);
   }
@@ -696,12 +800,14 @@ export class LocalClient {
 	return this.call<IncidentListResult>(`/api/local/projects/${projectID}/incidents${suffix}`);
   }
 
-  incident(projectID: string, incidentID: string) {
-	return this.call<IncidentResult>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}`);
+  incident(projectID: string, incidentID: string, nodeID?: string) {
+    const query = nodeID ? `?node_id=${encodeURIComponent(nodeID)}` : "";
+    return this.call<IncidentResult>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}${query}`);
   }
 
-  incidentEvidence(projectID: string, incidentID: string) {
-	return this.call<IncidentEvidence>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}/evidence`);
+  incidentEvidence(projectID: string, incidentID: string, nodeID?: string) {
+    const query = nodeID ? `?node_id=${encodeURIComponent(nodeID)}` : "";
+    return this.call<IncidentEvidence>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}/evidence${query}`);
   }
 
   async resources(projectID: string, environmentID?: string) {
@@ -964,6 +1070,7 @@ export class LocalClient {
         requestID: String(payload.request_id ?? res.headers.get("X-Request-ID") ?? ""),
         nextAction: String(payload.next_action ?? "Retry after checking Local backend connectivity."),
         retryable: Boolean(payload.retryable),
+        coverage: (data as Record<string, unknown>).coverage,
       });
       throw error;
     }
@@ -1010,7 +1117,11 @@ function normalizeDeploymentRun(run: DeploymentRun): DeploymentRun {
   run.plan.dependencies ??= [];
   run.plan.bindings ??= [];
   run.plan.secrets ??= [];
+  run.plan.application_environment_reviews ??= [];
   run.plan.issues ??= [];
+  for (const app of run.plan.applications) {
+    app.environment ??= {};
+  }
   run.plan.analysis_scope ??= { application_roots: [], exclude_paths: [] };
   run.plan.analysis_scope.application_roots ??= [];
   run.plan.analysis_scope.exclude_paths ??= [];

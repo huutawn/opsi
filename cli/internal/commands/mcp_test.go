@@ -15,7 +15,7 @@ type memoryKeychain struct {
 }
 
 func (m *memoryKeychain) GetPAT() (string, error) { return m.pat, nil }
-func (m *memoryKeychain) SetPAT(val string) error  { m.pat = val; return nil }
+func (m *memoryKeychain) SetPAT(val string) error { m.pat = val; return nil }
 func (m *memoryKeychain) DeletePAT() error        { m.pat = ""; return nil }
 
 func TestMCPCommand_VersionAndHelp(t *testing.T) {
@@ -88,5 +88,40 @@ func TestMCPCommand_StdioExecution(t *testing.T) {
 
 	if !strings.Contains(outBuf.String(), `"id":1`) {
 		t.Errorf("expected JSON-RPC response with id 1, got: %s", outBuf.String())
+	}
+}
+
+func TestMCPCommand_ServeAliasStdioExecution(t *testing.T) {
+	configPath := "dummy.yaml"
+	opts := Options{
+		Version:  "1.2.3",
+		Revision: "abc1234",
+		KeychainFactory: func() (keychain.Store, error) {
+			return &memoryKeychain{pat: "test-pat"}, nil
+		},
+	}
+
+	cmd := newMCPCommand(&configPath, opts)
+
+	inBuf := strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"ping"}` + "\n")
+	outBuf := &bytes.Buffer{}
+	errBuf := &bytes.Buffer{}
+
+	cmd.SetIn(inBuf)
+	cmd.SetOut(outBuf)
+	cmd.SetErr(errBuf)
+	cmd.SetArgs([]string{"serve"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	cmd.SetContext(ctx)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("mcp serve execute failed: %v", err)
+	}
+
+	if !strings.Contains(outBuf.String(), `"id":2`) {
+		t.Errorf("expected JSON-RPC response with id 2, got: %s", outBuf.String())
 	}
 }

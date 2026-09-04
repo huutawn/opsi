@@ -65,11 +65,13 @@ export type DetectedBinding = { from: string; to: string; kind: string; path?: s
 export type AnalysisIssue = { code: string; message: string; path?: string; resolution?: string; blocking: boolean };
 export type AnalysisScope = { application_roots: string[]; exclude_paths: string[] };
 export type EvidenceCoverage = { candidates_found: number; candidates_selected: number; files_inspected: number; bytes_inspected: number };
+export type ApplicationEnvironmentReview = { application_source_key: string; no_environment_required: boolean };
 export type DeploymentPlan = {
-  schema_version: "opsi.deployment_plan/v2"; hash: string;
+  schema_version: "opsi.deployment_plan/v3"; hash: string;
   source: { repository_id: number; installation_id: number; repository: string; selected_ref: string; commit_sha: string };
   applications: DetectedApplication[]; resources: DetectedResource[]; dependencies: DetectedDependency[]; bindings: DetectedBinding[];
   secrets: Array<{ name: string; application_key: string; environment_name: string; generated: boolean; secret_ref?: string; revision?: number; display: string; confidence: string; reason: string; evidence: RepositoryEvidence[] }>;
+  application_environment_reviews?: ApplicationEnvironmentReview[];
   issues: AnalysisIssue[];
   analysis_scope: AnalysisScope; analysis_scope_hash: string; evidence_coverage: EvidenceCoverage; truncation_reason?: string;
   target: { environment_id: string; runtime_id?: string; node_id?: string; hostname?: string; exposure: string; public_routes?: "automatic" | "manual"; cpu_milli?: number; memory_bytes?: number; cpu_limit_milli?: number; memory_limit_bytes?: number };
@@ -78,7 +80,7 @@ export type DeploymentPlan = {
 };
 export type DeploymentRunState = "analyzing" | "awaiting_input" | "awaiting_approval" | "provisioning" | "building" | "preflighting" | "awaiting_warning_ack" | "deploying" | "verifying" | "succeeded" | "stale" | "failed" | "rolling_back" | "cleaning_up" | "rolled_back" | "cancelled";
 export type DeploymentRun = {
-  schema_version: "opsi.deployment_run/v2"; id: string; project_id: string; created_by: string; state: DeploymentRunState;
+  schema_version: "opsi.deployment_run/v3"; id: string; project_id: string; created_by: string; state: DeploymentRunState;
   plan: DeploymentPlan; analysis: { authority?: string; issues?: AnalysisIssue[]; scope?: AnalysisScope; scope_hash?: string; evidence_coverage?: EvidenceCoverage; files_inspected?: number; bytes_inspected?: number; truncated?: boolean; truncation_reason?: string };
   approval?: { actor: string; plan_hash: string; approved_at: string };
   warning_acknowledgement?: { actor: string; preflight_hash: string; acknowledged_at: string };
@@ -187,8 +189,8 @@ export type ProposalReview = {
   rejected_by?: string; rejected_at?: string; applied_at?: string; resulting_configuration_revision?: number;
 };
 export type ProposalReviewCreateRequest = {
-  environment_id: string; kind: "service_configuration" | "source_patch"; analysis_inputs_hash: string;
-  source_commit?: string; application_root?: string; configuration_draft?: ServiceConfigurationDraft; source_patch?: unknown;
+  environment_id: string; kind: "service_configuration"; analysis_inputs_hash: string;
+  configuration_draft?: ServiceConfigurationDraft;
 };
 export type ServiceConfigurationApplyResult = { configuration: ServiceConfiguration; reused: boolean };
 
@@ -724,6 +726,34 @@ export type TimelineEvent = {
   created_at: string;
 };
 
+export type AgentDiagnosticError = {
+  node_id?: string;
+  agent_id?: string;
+  endpoint?: string;
+  code: string;
+  message_redacted: string;
+  actionable_cause?: string;
+};
+
+export type TelemetryCoverage = {
+  status: "connected" | "partial" | "unavailable";
+  expected_agents: number;
+  successful_agents: number;
+  failed_agents: number;
+  errors?: AgentDiagnosticError[];
+  observed_at: string;
+};
+
+export type ProjectAgentConnection = {
+  project_id: string;
+  status: "connected" | "partial" | "unavailable";
+  expected_agents: number;
+  successful_agents: number;
+  failed_agents: number;
+  errors?: AgentDiagnosticError[];
+  observed_at: string;
+};
+
 export type TelemetrySummary = {
   project_id: string;
   since_unix: number;
@@ -739,6 +769,8 @@ export type TelemetrySummary = {
   log_count?: number;
   error_count?: number;
   service_count?: number;
+  coverage?: TelemetryCoverage;
+  services?: TelemetryServiceStatus[];
 };
 
 export type TelemetryLogEntry = {
@@ -779,6 +811,7 @@ export type TelemetryQueryResponse = {
   services?: TelemetryServiceStatus[];
   logs?: TelemetryLogEntry[];
   next_cursor?: string;
+  coverage?: TelemetryCoverage;
 };
 
 export type SecretResult = {
@@ -819,6 +852,7 @@ export type IncidentListResult = {
   source: "agent";
   payload_policy: string;
   incidents: IncidentResponse[];
+  coverage?: TelemetryCoverage;
 };
 
 export type IncidentEvidence = {

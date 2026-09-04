@@ -5,7 +5,7 @@ import { Button, Empty, Icon, StatusBadge } from "@/components/ui/primitives";
 import { routeHref } from "@/features/console/navigation";
 import type { ConsoleController } from "@/features/console/types";
 import type { ObservabilityModel } from "@/features/observability/observability-view";
-import { SourceBadge, formatObserved } from "@/features/observability/shared";
+import { PartialCoverageBanner, SourceBadge, TimeWindowSelector, formatObserved } from "@/features/observability/shared";
 
 export function OverviewTab({
   console,
@@ -46,6 +46,32 @@ export function OverviewTab({
   const srvs = overview.servers;
   const res = overview.resources;
   const del = overview.delivery;
+  const isTelemetryFresh = sources.telemetry === "fresh" || sources.telemetry === "ready";
+  const isTelemetryPartial = sources.telemetry === "partial";
+  const isTelemetryStale = sources.telemetry === "stale";
+  const isTelemetryUnavailable = sources.telemetry === "unavailable";
+
+  const telemetryDotClass = isTelemetryFresh
+    ? "bg-status-ready animate-pulse"
+    : isTelemetryPartial || isTelemetryStale
+      ? "bg-status-warning"
+      : "bg-status-unknown";
+
+  const telemetryBannerTitle = isTelemetryFresh
+    ? "Live Factual Telemetry"
+    : isTelemetryPartial
+      ? model.data.summary?.coverage
+        ? `Partial Telemetry (${model.data.summary.coverage.successful_agents}/${model.data.summary.coverage.expected_agents} agents)`
+        : "Partial Telemetry"
+      : isTelemetryStale
+        ? "Stale Telemetry (Preserved Snapshot)"
+        : "Telemetry Unavailable";
+
+  const telemetryBannerSub = isTelemetryFresh || isTelemetryPartial
+    ? `• ${overview.freshness}`
+    : isTelemetryStale
+      ? `• ${overview.freshness} (Preserved Snapshot)`
+      : "• Unverified";
 
   return (
     <div className="space-y-6" data-testid="observability-overview">
@@ -59,18 +85,23 @@ export function OverviewTab({
       {/* Top Controls & Refresh Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-surface-container-low p-4 rounded-xl border border-outline-variant/20 shadow-sm">
         <div className="flex items-center gap-3">
-          <div className="w-2.5 h-2.5 rounded-full bg-status-ready animate-pulse" />
-          <span className="font-label-sm text-xs font-semibold text-on-surface">Live Factual Telemetry</span>
-          <span className="text-xs text-on-surface-variant font-code-md">• {overview.freshness}</span>
+          <div className={`w-2.5 h-2.5 rounded-full ${telemetryDotClass}`} />
+          <span className="font-label-sm text-xs font-semibold text-on-surface">{telemetryBannerTitle}</span>
+          <span className="text-xs text-on-surface-variant font-code-md">{telemetryBannerSub}</span>
         </div>
 
         <div className="flex items-center gap-3">
-          <span className="text-xs text-on-surface-variant font-code-md">Window: Last 1h</span>
+          <TimeWindowSelector
+            disabled={sources.telemetry === "loading"}
+            onChange={(win) => console.navigate({ window: win })}
+            value={console.route.window || "1h"}
+          />
           <Button
             disabled={sources.telemetry === "loading"}
             onClick={() => void model.load()}
             size="sm"
             variant="secondary"
+            aria-label="Refresh telemetry data"
           >
             <Icon name="refresh" className="text-[16px]" />
             Refresh
@@ -78,10 +109,26 @@ export function OverviewTab({
         </div>
       </div>
 
+      <PartialCoverageBanner
+        coverage={model.data.summary?.coverage}
+        sourceName="Telemetry"
+      />
+
       {model.data.error ? (
-        <div className="bg-error-container/20 border border-error/30 p-4 rounded-xl text-error text-xs flex items-center gap-2" role="alert">
-          <Icon name="error" className="text-[18px] shrink-0" />
-          <span>{model.data.error}</span>
+        <div className="bg-error-container/20 border border-error/30 p-4 rounded-xl text-error text-xs flex items-center justify-between gap-4" role="alert">
+          <div className="flex items-center gap-2 min-w-0">
+            <Icon name="error" className="text-[18px] shrink-0" />
+            <span className="truncate">{model.data.error}</span>
+          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => void model.load()}
+            aria-label="Retry refresh"
+            className="shrink-0"
+          >
+            Retry
+          </Button>
         </div>
       ) : null}
 
@@ -104,16 +151,42 @@ export function OverviewTab({
               {apps.total ? `${apps.ready}/${apps.total} Ready` : "0 Apps"}
             </div>
             <p className="text-xs text-on-surface-variant mt-1">
-              {apps.degraded > 0 || apps.failed > 0
-                ? `${apps.degraded} degraded • ${apps.failed} failed`
-                : apps.total
-                  ? "All workloads healthy"
-                  : "Deploy an app to observe"}
+              {isTelemetryStale
+                ? "Stale snapshot • Unverified"
+                : isTelemetryUnavailable || isTelemetryPartial
+                  ? `${apps.ready}/${apps.total} workloads verified`
+                  : apps.degraded > 0 || apps.failed > 0
+                    ? `${apps.degraded} degraded • ${apps.failed} failed`
+                    : apps.total > 0 && apps.ready === apps.total
+                      ? "All workloads healthy"
+                      : apps.total > 0
+                        ? `${apps.ready}/${apps.total} workloads ready`
+                        : "Deploy an app to observe"}
             </p>
           </div>
           <StatusBadge
-            label={apps.failed ? "Failed" : apps.degraded ? "Degraded" : apps.ready ? "Healthy" : "Unknown"}
-            value={apps.failed ? "failed" : apps.degraded ? "degraded" : apps.ready ? "healthy" : "unknown"}
+            label={
+              isTelemetryStale
+                ? "Stale"
+                : apps.failed
+                  ? "Failed"
+                  : apps.degraded
+                    ? "Degraded"
+                    : apps.ready && apps.ready === apps.total && isTelemetryFresh
+                      ? "Healthy"
+                      : "Unknown"
+            }
+            value={
+              isTelemetryStale
+                ? "stale"
+                : apps.failed
+                  ? "failed"
+                  : apps.degraded
+                    ? "degraded"
+                    : apps.ready && apps.ready === apps.total && isTelemetryFresh
+                      ? "healthy"
+                      : "unknown"
+            }
           />
         </a>
 
@@ -134,16 +207,40 @@ export function OverviewTab({
               {srvs.total ? `${srvs.ready}/${srvs.total} Active` : "0 Servers"}
             </div>
             <p className="text-xs text-on-surface-variant mt-1">
-              {srvs.offline > 0 || srvs.failed > 0
-                ? `${srvs.offline} offline • ${srvs.failed} failed`
-                : srvs.total
-                  ? "All execution nodes ready"
-                  : "No servers connected"}
+              {sources.nodes === "stale" || isTelemetryStale
+                ? "Stale observation • Unverified"
+                : srvs.offline > 0 || srvs.failed > 0
+                  ? `${srvs.offline} offline • ${srvs.failed} failed`
+                  : srvs.total > 0 && srvs.ready === srvs.total && sources.nodes !== "partial"
+                    ? "All execution nodes ready"
+                    : srvs.total > 0
+                      ? `${srvs.ready}/${srvs.total} nodes active`
+                      : "No servers connected"}
             </p>
           </div>
           <StatusBadge
-            label={srvs.failed ? "Failed" : srvs.offline ? "Offline" : srvs.ready ? "Healthy" : "Unknown"}
-            value={srvs.failed ? "failed" : srvs.offline ? "degraded" : srvs.ready ? "healthy" : "unknown"}
+            label={
+              sources.nodes === "stale" || isTelemetryStale
+                ? "Stale"
+                : srvs.failed
+                  ? "Failed"
+                  : srvs.offline
+                    ? "Offline"
+                    : srvs.ready && srvs.ready === srvs.total && sources.nodes !== "partial"
+                      ? "Healthy"
+                      : "Unknown"
+            }
+            value={
+              sources.nodes === "stale" || isTelemetryStale
+                ? "stale"
+                : srvs.failed
+                  ? "failed"
+                  : srvs.offline
+                    ? "degraded"
+                    : srvs.ready && srvs.ready === srvs.total && sources.nodes !== "partial"
+                      ? "healthy"
+                      : "unknown"
+            }
           />
         </a>
 
@@ -242,6 +339,16 @@ export function OverviewTab({
               </a>
             ))}
           </div>
+        ) : isTelemetryUnavailable || sources.incidents === "unavailable" ? (
+          <Empty
+            text="Live incident store or runtime telemetry is unavailable. System health cannot be verified until agent connection is restored."
+            title="Runtime Observation Unavailable"
+          />
+        ) : isTelemetryStale || sources.incidents === "stale" ? (
+          <Empty
+            text="Telemetry or incident refresh failed. The preserved snapshot cannot verify the absence of current runtime failures."
+            title="Runtime State Unverified (Stale Observation)"
+          />
         ) : (
           <Empty
             text="All observed applications, server execution nodes, and managed database resources report factual healthy state."

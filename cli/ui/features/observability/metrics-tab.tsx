@@ -3,11 +3,10 @@
 import { Button, Empty, Icon, StatusBadge } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
 import type { ObservabilityModel } from "@/features/observability/observability-view";
-
+import { PartialCoverageBanner, TimeWindowSelector } from "@/features/observability/shared";
 export function MetricsTab({ console, model }: { console: ConsoleController; model: ObservabilityModel }) {
   const telemetry = model.data.telemetry;
-  const agentUnavailable = console.session?.agent_connected !== "ok" || model.data.sources.telemetry === "unavailable";
-
+  const agentUnavailable = model.data.sources.telemetry === "unavailable";
   return (
     <div className="space-y-6" data-testid="observability-metrics">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -18,17 +17,23 @@ export function MetricsTab({ console, model }: { console: ConsoleController; mod
             Resource usage, restart counters, and reported telemetry metrics.
           </p>
         </div>
-        <Button
-          disabled={model.data.sources.telemetry === "loading"}
-          onClick={() => void model.load()}
-          size="sm"
-          variant="secondary"
-        >
-          <Icon name="refresh" className="text-[16px]" />
-          Refresh Metrics
-        </Button>
+        <div className="flex items-center gap-3">
+          <TimeWindowSelector
+            disabled={model.data.sources.telemetry === "loading"}
+            onChange={(win) => console.navigate({ window: win })}
+            value={console.route.window || "1h"}
+          />
+          <Button
+            disabled={model.data.sources.telemetry === "loading"}
+            onClick={() => void model.load()}
+            size="sm"
+            variant="secondary"
+          >
+            <Icon name="refresh" className="text-[16px]" />
+            Refresh Metrics
+          </Button>
+        </div>
       </div>
-
       {agentUnavailable ? (
         <div className="p-4 bg-status-warning/10 border border-status-warning/30 rounded-xl text-status-warning text-xs space-y-1">
           <b>Agent telemetry unavailable</b>
@@ -37,6 +42,11 @@ export function MetricsTab({ console, model }: { console: ConsoleController; mod
           </p>
         </div>
       ) : null}
+
+      <PartialCoverageBanner
+        coverage={model.data.summary?.coverage}
+        sourceName="Metrics"
+      />
 
       {telemetry.length ? (
         <div className="space-y-6">

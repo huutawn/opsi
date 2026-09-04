@@ -111,6 +111,31 @@ func parseSourcePatchProposal(args map[string]any) (SourcePatchProposal, error) 
 	return proposal, nil
 }
 
+// ParseSourcePatchProposalJSON exposes the same bounded parser used by the
+// read-only MCP validator to the local confirmed-apply boundary. It does not
+// read or write a repository.
+func ParseSourcePatchProposalJSON(raw json.RawMessage) (SourcePatchProposal, error) {
+	var proposal any
+	if len(raw) == 0 || json.Unmarshal(raw, &proposal) != nil {
+		return SourcePatchProposal{}, &DomainError{Code: ErrCodeInvalidArgument, Message: "proposal is malformed"}
+	}
+	return parseSourcePatchProposal(map[string]any{"proposal": proposal})
+}
+
+// ApplySourcePatchFile parses, rechecks secret safety, and performs the same
+// exact in-memory application used by the MCP validator. Callers own durable
+// filesystem mutation and must write the returned content atomically.
+func ApplySourcePatchFile(path string, content []byte, unifiedDiff string) ([]byte, error) {
+	parsed, err := parseUnifiedDiff(path, unifiedDiff)
+	if err != nil {
+		return nil, err
+	}
+	if patchAddsSecret(parsed) {
+		return nil, &DomainError{Code: ErrCodeSecretLiteralIntroduced, Message: "patch adds a credential-like literal"}
+	}
+	return virtualApply(content, parsed)
+}
+
 func (s *Server) handleValidateSourcePatchProposal(ctx context.Context, _ *Server, args map[string]any) (any, error) {
 	proposal, err := parseSourcePatchProposal(args)
 	if err != nil {

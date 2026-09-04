@@ -16,6 +16,7 @@ import type {
   TelemetryServiceStatus,
   TelemetrySummary,
   TopologyPlan,
+  TelemetryCoverage,
 } from "@/lib/contracts/registry";
 import type { ConsoleController } from "@/features/console/types";
 import {
@@ -31,7 +32,14 @@ import {
   type ServerRuntimeSummary,
 } from "@/lib/presentation/observability/model";
 
-export type SourceState = "loading" | "ready" | "empty" | "unavailable" | "partial";
+export type SourceState = "loading" | "ready" | "fresh" | "stale" | "partial" | "unavailable" | "empty";
+export type SourceDetail = {
+  state: SourceState;
+  observedAt?: number | string;
+  errorRedacted?: string;
+  coverage?: TelemetryCoverage;
+};
+
 export type SourceStates = {
   registry: SourceState;
   telemetry: SourceState;
@@ -40,6 +48,16 @@ export type SourceStates = {
   nodes: SourceState;
   resources: SourceState;
   deployments: SourceState;
+};
+
+export type SourceDetails = {
+  registry: SourceDetail;
+  telemetry: SourceDetail;
+  incidents: SourceDetail;
+  support: SourceDetail;
+  nodes: SourceDetail;
+  resources: SourceDetail;
+  deployments: SourceDetail;
 };
 
 export type LogState = {
@@ -67,6 +85,8 @@ export type ObservabilityData = {
   evidenceState: SourceState;
   evidenceError: string;
   sources: SourceStates;
+  sourceDetails: SourceDetails;
+  failingSources: string[];
   logs: LogState;
   error: string;
   // Presentation model projections
@@ -87,6 +107,15 @@ const emptySources: SourceStates = {
   deployments: "empty",
 };
 
+const emptyDetails: SourceDetails = {
+  registry: { state: "empty" },
+  telemetry: { state: "empty" },
+  incidents: { state: "empty" },
+  support: { state: "empty" },
+  nodes: { state: "empty" },
+  resources: { state: "empty" },
+  deployments: { state: "empty" },
+};
 const emptyOverview: RuntimeOverviewSummary = {
   applications: { ready: 0, degraded: 0, failed: 0, unknown: 0, total: 0 },
   servers: { ready: 0, offline: 0, failed: 0, unknown: 0, total: 0 },
@@ -114,6 +143,8 @@ const emptyData: ObservabilityData = {
   evidenceState: "empty",
   evidenceError: "",
   sources: emptySources,
+  sourceDetails: emptyDetails,
+  failingSources: [],
   logs: emptyLogs,
   error: "",
   applications: [],
@@ -129,12 +160,15 @@ export function useObservabilityData(console: ConsoleController) {
   const sequence = useRef(0);
   const incidentSequence = useRef(0);
   const [data, setData] = useState<ObservabilityData>(() => seedData(console));
+  const dataRef = useRef(data);
+  dataRef.current = data;
 
   const load = useCallback(async () => {
     if (!projectID) return;
+    const previous = dataRef.current;
     const current = ++sequence.current;
-    setData((previous) => ({
-      ...previous,
+    setData((prev) => ({
+      ...prev,
       error: "",
       sources: {
         ...previous.sources,
@@ -145,6 +179,10 @@ export function useObservabilityData(console: ConsoleController) {
         deployments: previous.deployments.length ? previous.sources.deployments : "loading",
       },
     }));
+
+    const windowParam = console.route.window || "1h";
+    const windowSeconds = windowParam === "24h" ? 86400 : windowParam === "6h" ? 21600 : 3600;
+    const sinceUnix = Math.floor(Date.now() / 1000) - windowSeconds;
 
     const [
       summaryRes,
@@ -159,7 +197,7 @@ export function useObservabilityData(console: ConsoleController) {
       auditRes,
       incidentsRes,
     ] = await Promise.allSettled([
-      client.telemetrySummary(projectID),
+      client.telemetrySummary(projectID, sinceUnix, windowParam),
       client.services(projectID),
       client.nodes(projectID),
       client.resources(projectID, environmentID || undefined),
@@ -171,34 +209,143 @@ export function useObservabilityData(console: ConsoleController) {
       client.audit(projectID),
       client.incidents(projectID),
     ]);
-
     if (current !== sequence.current) return;
 
-    const services = servicesRes.status === "fulfilled" ? servicesRes.value.services ?? [] : console.state.services;
-    const nodes = nodesRes.status === "fulfilled" ? nodesRes.value : console.state.nodes;
-    const resources = resourcesRes.status === "fulfilled" ? resourcesRes.value : [];
-    const bindings = bindingsRes.status === "fulfilled" ? bindingsRes.value : [];
-    const deployments = deploymentsRes.status === "fulfilled" ? deploymentsRes.value.deployments ?? [] : console.state.deployments;
+    const failingSources: string[] = [];
+
+    // Registry / services
+    let services = console.state.services;
+    let registryState: SourceState = "empty";
+    let registryError: string | undefined;
+    if (servicesRes.status === "fulfilled") {
+      services = servicesRes.value.services ?? [];
+      registryState = services.length ? "fresh" : "empty";
+    } else {
+      failingSources.push("Cloud registry");
+      registryError = servicesRes.reason instanceof Error ? servicesRes.reason.message : "Registry unavailable";
+      if (previous.services.length) {
+        services = previous.services;
+        registryState = "stale";
+      } else {
+        registryState = "unavailable";
+      }
+    }
+
+    // Nodes
+    let nodes = console.state.nodes;
+    let nodesState: SourceState = "empty";
+    let nodesError: string | undefined;
+    if (nodesRes.status === "fulfilled") {
+      nodes = nodesRes.value ?? [];
+      nodesState = nodes.length ? "fresh" : "empty";
+    } else {
+      failingSources.push("Server nodes");
+      nodesError = nodesRes.reason instanceof Error ? nodesRes.reason.message : "Nodes unavailable";
+      if (previous.nodes.length) {
+        nodes = previous.nodes;
+        nodesState = "stale";
+      } else {
+        nodesState = "unavailable";
+      }
+    }
+
+    // Telemetry snapshot
+    let summary = previous.summary;
+    let telemetry: TelemetryServiceStatus[] = previous.telemetry;
+    let telemetryState: SourceState = "empty";
+    let telemetryError: string | undefined;
+    let telemetryCoverage: TelemetryCoverage | undefined;
+
+    if (summaryRes.status === "fulfilled") {
+      summary = summaryRes.value;
+      telemetryCoverage = summary.coverage;
+      telemetry = summary.services ?? [];
+      if (telemetryCoverage?.status === "partial") {
+        telemetryState = "partial";
+      } else if (telemetryCoverage?.status === "unavailable") {
+        telemetryState = previous.summary ? "stale" : "unavailable";
+      } else {
+        telemetryState = telemetry.length || (summary.record_count && summary.record_count > 0) || services.length === 0 ? "fresh" : "empty";
+      }
+    } else {
+      failingSources.push("Agent telemetry");
+      telemetryError = summaryRes.reason instanceof Error ? summaryRes.reason.message : "Telemetry unavailable";
+      if (summaryRes.reason && typeof summaryRes.reason === "object" && "coverage" in summaryRes.reason) {
+        const reasonObj = summaryRes.reason;
+        if (reasonObj.coverage && typeof reasonObj.coverage === "object") {
+          telemetryCoverage = reasonObj.coverage as TelemetryCoverage;
+        }
+      }
+      if (previous.summary) {
+        summary = previous.summary;
+        telemetry = previous.telemetry;
+        telemetryState = "stale";
+      } else {
+        summary = null;
+        telemetry = [];
+        telemetryState = "unavailable";
+      }
+    }
+
+    // Incidents
+    let incidents = console.state.incidents;
+    let incidentsState: SourceState = "empty";
+    let incidentsError: string | undefined;
+    let incidentsCoverage: TelemetryCoverage | undefined;
+    if (incidentsRes.status === "fulfilled") {
+      incidents = incidentsRes.value.incidents ?? [];
+      incidentsCoverage = incidentsRes.value.coverage;
+      if (incidentsCoverage?.status === "partial") {
+        incidentsState = "partial";
+      } else if (incidentsCoverage?.status === "unavailable") {
+        incidentsState = previous.incidents.length ? "stale" : "unavailable";
+      } else {
+        incidentsState = incidents.length ? "fresh" : "empty";
+      }
+    } else {
+      failingSources.push("Incident store");
+      incidentsError = incidentsRes.reason instanceof Error ? incidentsRes.reason.message : "Incidents unavailable";
+      if (incidentsRes.reason && typeof incidentsRes.reason === "object" && "coverage" in incidentsRes.reason) {
+        const reasonObj = incidentsRes.reason;
+        if (reasonObj.coverage && typeof reasonObj.coverage === "object") {
+          incidentsCoverage = reasonObj.coverage as TelemetryCoverage;
+        }
+      }
+      if (previous.incidents.length) {
+        incidents = previous.incidents;
+        incidentsState = "stale";
+      } else {
+        incidents = [];
+        incidentsState = "unavailable";
+      }
+    }
+    let resources = previous.resources;
+    let resourcesState: SourceState = "empty";
+    if (resourcesRes.status === "fulfilled") {
+      resources = resourcesRes.value ?? [];
+      resourcesState = resources.length ? "fresh" : "empty";
+    } else {
+      failingSources.push("Managed resources");
+      resourcesState = previous.resources.length ? "stale" : "unavailable";
+    }
+
+    let deployments = console.state.deployments;
+    let deploymentsState: SourceState = "empty";
+    if (deploymentsRes.status === "fulfilled") {
+      deployments = deploymentsRes.value.deployments ?? [];
+      deploymentsState = deployments.length ? "fresh" : "empty";
+    } else {
+      failingSources.push("Delivery rollouts");
+      deployments = previous.deployments;
+      deploymentsState = previous.deployments.length ? "stale" : "unavailable";
+    }
+
+    const bindings = bindingsRes.status === "fulfilled" ? bindingsRes.value ?? [] : [];
     const exposures = exposuresRes.status === "fulfilled" ? exposuresRes.value.exposures ?? [] : [];
     const placement = placementRes.status === "fulfilled" ? placementRes.value : console.state.foundation.placement;
     const topology = topologyRes.status === "fulfilled" ? topologyRes.value : console.state.foundation.topology;
     const audit = auditRes.status === "fulfilled" ? auditRes.value.events ?? [] : console.state.audit;
-    const incidents = incidentsRes.status === "fulfilled" ? incidentsRes.value.incidents ?? [] : console.state.incidents;
-    const summary = summaryRes.status === "fulfilled" ? summaryRes.value : null;
-
-    // Fetch individual service telemetries if services exist
-    let telemetry: TelemetryServiceStatus[] = [];
-    if (services.length > 0) {
-      const serviceTelemetryRes = await Promise.allSettled(
-        services.map((service) => client.telemetryService(projectID, service.id)),
-      );
-      if (current !== sequence.current) return;
-      telemetry = serviceTelemetryRes.flatMap((res) => (res.status === "fulfilled" ? res.value.services ?? [] : []));
-    }
-
-    const agentAvailable = console.session?.agent_connected === "ok";
-
-    // Compute presentation models
+    const agentAvailable = telemetryCoverage?.status === "connected" && telemetryState === "fresh";
     const applications = deriveApplicationRuntimeSummaries({
       services,
       telemetry,
@@ -238,13 +385,29 @@ export function useObservabilityData(console: ConsoleController) {
       audit,
     });
 
-    const hasAnyFailure =
-      summaryRes.status === "rejected" ||
-      servicesRes.status === "rejected" ||
-      nodesRes.status === "rejected" ||
-      resourcesRes.status === "rejected" ||
-      deploymentsRes.status === "rejected" ||
-      incidentsRes.status === "rejected";
+    const sources: SourceStates = {
+      registry: registryState,
+      telemetry: telemetryState,
+      incidents: incidentsState,
+      support: console.state.support ? "ready" : "unavailable",
+      nodes: nodesState,
+      resources: resourcesState,
+      deployments: deploymentsState,
+    };
+
+    const sourceDetails: SourceDetails = {
+      registry: { state: registryState, errorRedacted: registryError, observedAt: Date.now() },
+      telemetry: { state: telemetryState, errorRedacted: telemetryError, observedAt: summary?.end_unix || Date.now(), coverage: telemetryCoverage },
+      incidents: { state: incidentsState, errorRedacted: incidentsError, observedAt: Date.now(), coverage: incidentsCoverage },
+      support: { state: console.state.support ? "ready" : "unavailable", observedAt: Date.now() },
+      nodes: { state: nodesState, errorRedacted: nodesError, observedAt: Date.now() },
+      resources: { state: resourcesState, observedAt: Date.now() },
+      deployments: { state: deploymentsState, observedAt: Date.now() },
+    };
+
+    const errorMessage = failingSources.length > 0
+      ? `Refresh failed for: ${failingSources.join(", ")}; last factual data is preserved.`
+      : "";
 
     setData((previous) => ({
       ...previous,
@@ -264,29 +427,26 @@ export function useObservabilityData(console: ConsoleController) {
       servers,
       managedResources,
       overview,
-      sources: {
-        registry: services.length ? "ready" : "empty",
-        telemetry: summaryRes.status === "fulfilled" ? (telemetry.length ? "ready" : "empty") : previous.summary ? "partial" : "unavailable",
-        incidents: incidentsRes.status === "fulfilled" ? (incidents.length ? "ready" : "empty") : previous.incidents.length ? "partial" : "unavailable",
-        support: console.state.support ? "ready" : "unavailable",
-        nodes: nodesRes.status === "fulfilled" ? (nodes.length ? "ready" : "empty") : "unavailable",
-        resources: resourcesRes.status === "fulfilled" ? (resources.length ? "ready" : "empty") : "unavailable",
-        deployments: deploymentsRes.status === "fulfilled" ? (deployments.length ? "ready" : "empty") : "unavailable",
-      },
-      error: hasAnyFailure ? "A refresh source failed; last factual data is preserved." : "",
+      sources,
+      sourceDetails,
+      failingSources,
+      error: errorMessage,
     }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, console.session?.agent_connected, console.state.support, environmentID, projectID]);
+  }, [client, console.route.window, console.session?.agent_connected, console.state.support, environmentID, projectID]);
 
   const loadLogs = useCallback(
     async (params: { serviceID?: string; cursor?: string; level?: string; query?: string } = {}) => {
       if (!projectID) return { logs: [] };
+      const windowParam = console.route.window || "1h";
+      const windowSeconds = windowParam === "24h" ? 86400 : windowParam === "6h" ? 21600 : 3600;
+      const sinceUnix = Math.floor(Date.now() / 1000) - windowSeconds;
       setData((previous) => ({
         ...previous,
         logs: { ...previous.logs, source: previous.logs.rows.length ? previous.logs.source : "loading", error: "" },
       }));
       try {
-        const result = await client.logs(projectID, { serviceID: params.serviceID, cursor: params.cursor, limit: 100 });
+        const result = await client.logs(projectID, { serviceID: params.serviceID, cursor: params.cursor, limit: 100, sinceUnix, window: windowParam });
         setData((previous) => ({
           ...previous,
           logs: {
@@ -309,27 +469,27 @@ export function useObservabilityData(console: ConsoleController) {
         throw error;
       }
     },
-    [client, projectID],
+    [client, console.route.window, projectID],
   );
 
   const selectIncident = useCallback(
-    async (incidentID: string) => {
+    async (incidentID: string, nodeID?: string) => {
       if (!projectID || !incidentID) return;
       const current = ++incidentSequence.current;
       setData((previous) => ({
         ...previous,
-        selectedIncident: previous.incidents.find((item) => item.incident_id === incidentID) ?? null,
+        selectedIncident: previous.incidents.find((item) => item.incident_id === incidentID && (!nodeID || item.node_id === nodeID)) ?? null,
         evidence: null,
         evidenceState: "loading",
         evidenceError: "",
         sources: { ...previous.sources, incidents: "loading" },
       }));
       const [incidentRes, evidenceRes] = await Promise.allSettled([
-        client.incident(projectID, incidentID),
-        client.incidentEvidence(projectID, incidentID),
+        client.incident(projectID, incidentID, nodeID),
+        client.incidentEvidence(projectID, incidentID, nodeID),
       ]);
       if (current !== incidentSequence.current) return;
-      const incident = incidentRes.status === "fulfilled" ? incidentRes.value.incident : data.incidents.find((item) => item.incident_id === incidentID) ?? null;
+      const incident = incidentRes.status === "fulfilled" ? incidentRes.value.incident : data.incidents.find((item) => item.incident_id === incidentID && (!nodeID || item.node_id === nodeID)) ?? null;
       const validEvidence = evidenceRes.status === "fulfilled" && isIncidentEvidence(evidenceRes.value);
       setData((previous) => ({
         ...previous,
@@ -340,9 +500,9 @@ export function useObservabilityData(console: ConsoleController) {
         evidenceError:
           evidenceRes.status === "rejected"
             ? (evidenceRes.reason as Error).message
-            : validEvidence
-            ? ""
-            : "Incident evidence failed structural validation.",
+            : !validEvidence && evidenceRes.status === "fulfilled"
+              ? "Incident evidence payload failed schema validation"
+              : "",
       }));
     },
     [client, data.incidents, projectID],
@@ -365,10 +525,13 @@ export function useObservabilityData(console: ConsoleController) {
 
   useEffect(() => {
     const incidentID = console.route.incident;
-    if (incidentID && data.incidents.some((item) => item.incident_id === incidentID) && data.selectedIncident?.incident_id !== incidentID) {
-      void selectIncident(incidentID);
+    const nodeID = console.route.node;
+    if (incidentID && data.incidents.some((item) => item.incident_id === incidentID && (!nodeID || item.node_id === nodeID))) {
+      if (data.selectedIncident?.incident_id !== incidentID || (nodeID && data.selectedIncident?.node_id !== nodeID)) {
+        void selectIncident(incidentID, nodeID);
+      }
     }
-  }, [console.route.incident, data.incidents, data.selectedIncident?.incident_id, selectIncident]);
+  }, [console.route.incident, console.route.node, data.incidents, data.selectedIncident?.incident_id, data.selectedIncident?.node_id, selectIncident]);
 
   return useMemo(
     () => ({ data, load, loadLogs, selectIncident, getApplicationEvents }),
@@ -445,9 +608,9 @@ function seedData(console: ConsoleController): ObservabilityData {
 
 export function overallHealth(data: ObservabilityData, services: number, agentAvailable: boolean) {
   if (!services) return "unknown";
-  if (!agentAvailable || data.sources.telemetry === "unavailable" || data.sources.incidents === "unavailable") return "unknown";
+  if (!agentAvailable || data.sources.telemetry === "unavailable" || data.sources.incidents === "unavailable" || data.sources.telemetry === "stale") return "unknown";
   if (data.sources.telemetry === "partial" || data.sources.incidents === "partial" || data.telemetry.some((item) => item.ready_pods < item.pod_count || ["degraded", "failed", "critical"].includes(item.health))) return "degraded";
-  return data.sources.telemetry === "ready" ? "healthy" : "unknown";
+  return data.sources.telemetry === "fresh" || data.sources.telemetry === "ready" ? "healthy" : "unknown";
 }
 
 export function safeLogMessage(message: string) {

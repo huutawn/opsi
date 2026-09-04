@@ -1,5 +1,6 @@
 export const projectDestinations = [
   { id: "deploy", label: "Deploy" },
+  { id: "assistant", label: "AI Assistant" },
   { id: "observability", label: "Observability" },
   { id: "security", label: "Security" },
 ] as const;
@@ -81,7 +82,7 @@ export function normalizeRoute(route: Partial<ConsoleRoute>): ConsoleRoute {
 
   const tabs = view in groupedTabs ? groupedTabs[view as keyof typeof groupedTabs] : [];
   const tab = route.tab ?? "";
-  const isKnownTab = tabs.some((item) => item.id === tab);
+  const isKnownTab = tabs.some((item) => item.id === tab) || (view === "observability" && tab === "incidents");
   const validTab = isKnownTab ? tab : defaultTab(view);
 
   return { projectID, view, tab: validTab, ...compactViewState(view, route) };

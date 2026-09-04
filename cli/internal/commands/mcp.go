@@ -14,7 +14,6 @@ import (
 
 type mcpFlags struct {
 	projectID string
-	addr      string
 	version   bool
 }
 
@@ -23,7 +22,7 @@ func newMCPCommand(configPath *string, options Options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mcp",
 		Short: "Start the read-only Model Context Protocol (MCP) server",
-		Long:  "Starts a Model Context Protocol (MCP) server over stdio or local loopback HTTP. Provides read-only access to project topology, source snapshots, deployment preflight, and dependency verification facts.",
+		Long:  "Starts a Model Context Protocol (MCP) server over stdio. Provides read-only access to project topology, source snapshots, deployment preflight, and dependency verification facts.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if flags.version {
 				_, err := fmt.Fprintf(cmd.OutOrStdout(), "opsi-mcp %s (%s)\n", options.Version, mcp.SurfaceVersion)
@@ -34,7 +33,6 @@ func newMCPCommand(configPath *string, options Options) *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&flags.projectID, "project-id", "", "default project ID for MCP queries")
-	cmd.Flags().StringVar(&flags.addr, "addr", "", "HTTP listen address (e.g. 127.0.0.1:9781) instead of stdio")
 	cmd.Flags().BoolVar(&flags.version, "version", false, "print MCP server surface version")
 
 	serveCmd := &cobra.Command{
@@ -49,7 +47,6 @@ func newMCPCommand(configPath *string, options Options) *cobra.Command {
 		},
 	}
 	serveCmd.Flags().StringVar(&flags.projectID, "project-id", "", "default project ID for MCP queries")
-	serveCmd.Flags().StringVar(&flags.addr, "addr", "", "HTTP listen address (e.g. 127.0.0.1:9781) instead of stdio")
 	serveCmd.Flags().BoolVar(&flags.version, "version", false, "print MCP server surface version")
 
 	cmd.AddCommand(serveCmd)
@@ -73,10 +70,6 @@ func runMCP(parent context.Context, configPath string, options Options, flags *m
 		GitRunner:        options.GitRunner,
 		LogWriter:        cmd.ErrOrStderr(),
 	})
-
-	if flags.addr != "" {
-		return server.ServeHTTP(ctx, flags.addr)
-	}
 
 	return server.ServeStdio(ctx, cmd.InOrStdin(), cmd.OutOrStdout())
 }

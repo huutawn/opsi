@@ -1,3 +1,4 @@
+import { formatDate, formatFreshness as formatFreshnessI18n, translate, type Locale } from "../../i18n/index.ts";
 import type {
   AuditEvent,
   DeploymentJob,
@@ -172,21 +173,8 @@ export type SafeLogEntry = {
   untrustedContent: true;
 };
 
-export function formatFreshness(timestamp?: string | number | null, now = Date.now()): string {
-  if (!timestamp) return "Not reported";
-  const timeMs = typeof timestamp === "number"
-    ? (timestamp < 10_000_000_000 ? timestamp * 1000 : timestamp)
-    : Date.parse(timestamp);
-  if (!Number.isFinite(timeMs)) return "Not reported";
-  const seconds = Math.round((now - timeMs) / 1000);
-  if (seconds < 0) return "Just now";
-  if (seconds < 60) return `Observed ${seconds}s ago`;
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `Observed ${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `Observed ${hours}h ago`;
-  const days = Math.round(hours / 24);
-  return `Observed ${days}d ago`;
+export function formatFreshness(timestamp?: string | number | null, now = Date.now(), locale: Locale = "en"): string {
+  return formatFreshnessI18n(timestamp, locale, now);
 }
 
 export function formatShortDigest(digest?: string, size = 12): string {
@@ -794,11 +782,8 @@ export function deriveApplicationEvents(
   return events.sort((a, b) => toMillis(b.timestamp) - toMillis(a.timestamp));
 }
 
-function formatDateTime(value?: string | number | null): string {
-  if (!value) return "Not reported";
-  const ms = typeof value === "number" ? (value < 10_000_000_000 ? value * 1000 : value) : Date.parse(value);
-  if (!Number.isFinite(ms)) return "Not reported";
-  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(ms));
+function formatDateTime(value?: string | number | null, locale: Locale = "en"): string {
+  return formatDate(value, locale);
 }
 
 function toMillis(value?: string | number): number {
@@ -806,41 +791,42 @@ function toMillis(value?: string | number): number {
   return value ? Date.parse(value) || 0 : 0;
 }
 
-function labelForWorkloadStatus(status: WorkloadRuntimeStatus): string {
-  switch (status) {
-    case "ready": return "Ready";
-    case "degraded": return "Degraded";
-    case "failed": return "Failed";
-    case "in_progress": return "In Progress";
-    case "not_deployed": return "Not Deployed";
-    case "unknown": return "Unknown";
-  }
+function labelForWorkloadStatus(status: WorkloadRuntimeStatus, locale: Locale = "en"): string {
+  return translate(`status.${status}`, locale, {
+    ready: "Ready",
+    degraded: "Degraded",
+    failed: "Failed",
+    in_progress: "In Progress",
+    not_deployed: "Not Deployed",
+    unknown: "Unknown",
+  }[status] ?? status);
 }
 
-function labelForExposureStatus(status: ExposureRuntimeStatus): string {
-  switch (status) {
-    case "ready": return "Ready";
-    case "failed": return "Failed";
-    case "not_configured": return "Not Configured";
-    case "unknown": return "Unknown";
-  }
+function labelForExposureStatus(status: ExposureRuntimeStatus, locale: Locale = "en"): string {
+  return translate(`status.${status}`, locale, {
+    ready: "Ready",
+    failed: "Failed",
+    not_configured: "Not Configured",
+    unknown: "Unknown",
+  }[status] ?? status);
 }
 
-function labelForDeploymentOutcome(status: DeploymentOutcomeStatus): string {
-  switch (status) {
-    case "succeeded": return "Succeeded";
-    case "failed": return "Failed";
-    case "in_progress": return "In Progress";
-    case "unknown": return "Unknown";
-  }
+function labelForDeploymentOutcome(status: DeploymentOutcomeStatus, locale: Locale = "en"): string {
+  return translate(`status.${status}`, locale, {
+    succeeded: "Succeeded",
+    failed: "Failed",
+    in_progress: "In Progress",
+    unknown: "Unknown",
+  }[status] ?? status);
 }
 
-function labelForResourceStatus(status: ResourceRuntimeStatus): string {
-  switch (status) {
-    case "ready": return "Ready";
-    case "degraded": return "Degraded";
-    case "failed": return "Failed";
-    case "provisioning": return "Provisioning";
-    case "unknown": return "Unknown";
-  }
+function labelForResourceStatus(status: ResourceRuntimeStatus, locale: Locale = "en"): string {
+  const fallbackMap: Record<ResourceRuntimeStatus, string> = {
+    ready: "Ready",
+    degraded: "Degraded",
+    failed: "Failed",
+    unknown: "Unknown",
+    provisioning: "Provisioning",
+  };
+  return translate(`status.${status}`, locale, fallbackMap[status] ?? status);
 }

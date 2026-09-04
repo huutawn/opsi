@@ -224,11 +224,11 @@ func (s *Service) latestProjectExposuresLocked(projectID string) []exposurev1.Ex
 	return result
 }
 
-// appliedExposure is the only exposure state that may be preserved as the
-// current public route. A failed pre-mutation rollout never reached Kubernetes
-// and must not make an equivalent retry appear unchanged.
+// appliedExposure selects the latest durable desired route. A rolled-back
+// rollout keeps its desired exposure while the separate known-good fields keep
+// the factual runtime target that was restored.
 func appliedExposure(job DeploymentJob) bool {
-	return job.ExposureSpec != nil && job.Status == deploymentv1.StateSucceeded && job.RolloutState == deploymentv1.RolloutStateSucceeded
+	return job.ExposureSpec != nil && job.Status == job.RolloutState && (job.RolloutState == deploymentv1.RolloutStateSucceeded || job.RolloutState == deploymentv1.RolloutStateRolledBack)
 }
 
 // reservedExposure keeps in-flight routes visible to overlap protection, while

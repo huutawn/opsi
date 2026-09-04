@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -23,6 +24,7 @@ import (
 	"unicode"
 
 	"github.com/opsi-dev/opsi/cli/internal/agentclient"
+	"github.com/opsi-dev/opsi/cli/internal/assistant"
 	"github.com/opsi-dev/opsi/cli/internal/cloudclient"
 	"github.com/opsi-dev/opsi/cli/internal/config"
 	"github.com/opsi-dev/opsi/cli/internal/keychain"
@@ -72,8 +74,10 @@ func runStart(ctx context.Context, addr, devUI, configPath string, out io.Writer
 	}
 	defer listener.Close()
 
+	mux, assistantMgr := newStartServer(resolveUIDir(), devUI, cfg, factory, configPath)
+	defer assistantMgr.Close()
 	server := &http.Server{
-		Handler:           newStartMux(resolveUIDir(), devUI, cfg, factory, configPath),
+		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -135,11 +139,25 @@ func resolveAgentSnapshot(startup config.Config, resolver ...agentConfigResolver
 }
 
 func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychain.Store, error), configPaths ...string) *http.ServeMux {
+	mux, _ := newStartServer(uiDir, devUI, cfg, factory, configPaths...)
+	return mux
+}
+
+func newStartServer(uiDir, devUI string, cfg config.Config, factory func() (keychain.Store, error), configPaths ...string) (*http.ServeMux, *assistant.Manager) {
 	configPath := ""
 	if len(configPaths) > 0 {
 		configPath = configPaths[0]
 	}
 	agentResolver := newAgentConfigResolver(cfg, configPath)
+	repoRoot, _ := os.Getwd()
+	opsiBinary, _ := os.Executable()
+	assistantManager := assistant.NewManager(assistant.NewCodexProvider(assistant.CodexOptions{OpsiBinary: opsiBinary, ConfigPath: configPath, RepoRoot: repoRoot}))
+	assistantManager.SetRepositoryRoot(repoRoot)
+	if historyStore, err := assistant.NewHistoryStore("", configPath); err == nil && historyStore != nil {
+		assistantManager.SetHistoryStore(historyStore)
+	} else if err != nil {
+		assistantManager.SetHistoryError(err)
+	}
 	localSession := newLocalSessionToken()
 	authFlow := &localAuthFlow{
 		states:                  map[string]localAuthPending{},
@@ -304,7 +322,7 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 		authFlow.setSession(identity)
 		writeLocalJSON(w, http.StatusOK, map[string]any{
 			"authenticated": true, "token_status": tokenState, "cloud_connected": cloudState,
-			"agent_connected": probeAgent(r.Context(), cfg, factory, agentResolver),
+			"agent_connected": probeAgent(r.Context(), cfg, factory, identity.ProjectID, agentResolver),
 			"org_id":          identity.OrgID, "project_id": identity.ProjectID, "role": identity.Role,
 		})
 	})
@@ -332,7 +350,7 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"authenticated":   authenticated,
 			"cloud_connected": cloudState,
-			"agent_connected": probeAgent(r.Context(), cfg, factory, agentResolver),
+			"agent_connected": probeAgent(r.Context(), cfg, factory, projectID, agentResolver),
 			"token_status":    tokenState,
 			"user_id":         identity.UserID,
 			"org_id":          identity.OrgID,
@@ -382,17 +400,17 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 			writeLocalError(w, r, http.StatusBadRequest, "ORG_ID_REQUIRED", "org_id must come from the authenticated session")
 			return
 		}
+		if handleLocalAssistantRoutes(w, r, assistantManager, cfg, factory, localSession) {
+			return
+		}
 		if handleLocalAgentRoutes(w, r, cfg, factory, localSession, agentResolver) {
 			return
 		}
 		proxyLocalRegistry(w, r, cfg, factory, localSession, authFlow)
 	})
 
-	mux := http.NewServeMux()
-	mux.Handle("/health", routes)
-	mux.Handle("/api/local/", boundedLocalAPI(routes))
-	mux.Handle("/", newUIHandler(uiDir, devUI))
-	return mux
+	routes.Handle("/", newUIHandler(uiDir, devUI))
+	return routes, assistantManager
 }
 
 func configuredAuthority(raw string) string {
@@ -850,21 +868,34 @@ func logoutLocalSession(w http.ResponseWriter, r *http.Request, cfg config.Confi
 	writeLocalJSON(w, http.StatusOK, map[string]any{"authenticated": false, "revoked": true})
 }
 
-func probeAgent(ctx context.Context, cfg config.Config, factory func() (keychain.Store, error), resolver ...agentConfigResolver) string {
-	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+func probeAgent(ctx context.Context, cfg config.Config, factory func() (keychain.Store, error), projectID string, resolver ...agentConfigResolver) string {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return "unknown"
+	}
+	if agentCfg, err := resolveAgentSnapshot(cfg, resolver...); err == nil {
+		cfg = agentCfg
+	}
+	pat := optionalPAT(factory)
+	var cloudClient agentclient.NodeLister
+	if client, err := cloudclient.New(cfg.CloudURL, pat, "opsi-local-ui", http.DefaultClient); err == nil && client != nil {
+		cloudClient = client
+	}
+	targetResolver := agentclient.NewAgentTargetResolver(agentclient.AgentTargetResolverOptions{
+		CloudClient: cloudClient,
+		BaseConfig:  cfg,
+		PAT:         pat,
+	})
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	conn, err := targetResolver.CheckConnection(ctx, projectID)
 	if err != nil {
 		return "failed"
 	}
-	if strings.TrimSpace(agentCfg.AgentAddr) == "" {
-		return "not connected"
+	if conn.Status == agentclient.CoverageConnected || conn.Status == agentclient.CoveragePartial {
+		return "ok"
 	}
-	ctx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
-	defer cancel()
-	ctx = agentclient.WithPAT(ctx, optionalPAT(factory))
-	if _, err := agentclient.New(agentCfg).Status(ctx); err != nil {
-		return "failed"
-	}
-	return "ok"
+	return "failed"
 }
 
 func localPATStatus(ctx context.Context, cfg config.Config, factory func() (keychain.Store, error), projectID string) (bool, string, string, localSessionIdentity) {
@@ -954,11 +985,48 @@ func handleLocalAgentRoutes(w http.ResponseWriter, r *http.Request, cfg config.C
 			return true
 		}
 	}
-	return localTelemetry(w, r, cfg, factory, resolver) ||
+	return localProjectAgentConnection(w, r, cfg, factory) ||
+		localTelemetry(w, r, cfg, factory) ||
 		localSecretOperation(w, r, cfg, factory, resolver) ||
 		localIncidentOperation(w, r, cfg, factory, resolver)
 }
 
+func localProjectAgentConnection(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error)) bool {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) != 5 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" || parts[4] != "agent-connection" {
+		return false
+	}
+	if r.Method != http.MethodGet {
+		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+		return true
+	}
+	projectID, err := url.PathUnescape(parts[3])
+	if err != nil || strings.TrimSpace(projectID) == "" {
+		writeLocalError(w, r, http.StatusBadRequest, "PROJECT_ID_REQUIRED", "project_id is required")
+		return true
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("content-type", "application/json")
+	pat := optionalPAT(factory)
+	var cloudClient agentclient.NodeLister
+	if client, err := cloudclient.New(cfg.CloudURL, pat, "opsi-local-ui", http.DefaultClient); err == nil && client != nil {
+		cloudClient = client
+	}
+	targetResolver := agentclient.NewAgentTargetResolver(agentclient.AgentTargetResolverOptions{
+		CloudClient: cloudClient,
+		BaseConfig:  cfg,
+		PAT:         pat,
+	})
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	resp, err := targetResolver.CheckConnection(ctx, projectID)
+	if err != nil {
+		writeLocalError(w, r, http.StatusBadGateway, "AGENT_CONNECTION_CHECK_FAILED", err.Error())
+		return true
+	}
+	writeLocalJSON(w, http.StatusOK, resp)
+	return true
+}
 func localSecretOperation(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), resolver ...agentConfigResolver) bool {
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(parts) < 5 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" || parts[4] != "secrets" {
@@ -1307,39 +1375,74 @@ func rejectCallerAuthorityQuery(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func callLocalIncidentListAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentListRequest, resolver ...agentConfigResolver) {
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	if agentCfg, err := resolveAgentSnapshot(cfg, resolver...); err == nil {
+		cfg = agentCfg
+	}
+	pat := optionalPAT(factory)
+	var cloudClient agentclient.NodeLister
+	if client, err := cloudclient.New(cfg.CloudURL, pat, "opsi-local-ui", http.DefaultClient); err == nil && client != nil {
+		cloudClient = client
+	}
+	targetResolver := agentclient.NewAgentTargetResolver(agentclient.AgentTargetResolverOptions{
+		CloudClient: cloudClient,
+		BaseConfig:  cfg,
+		PAT:         pat,
+	})
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	if pat := optionalPAT(factory); pat != "" {
-		ctx = agentclient.WithPAT(ctx, pat)
-	}
-	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+
+	resp, coverage, err := targetResolver.ListIncidents(ctx, req)
 	if err != nil {
-		writeLocalAgentIncidentError(w, r, err)
-		return
-	}
-	resp, err := agentclient.New(agentCfg).ListIncidents(ctx, req)
-	if err != nil {
+		var unavail *agentclient.TelemetryUnavailableError
+		if errors.As(err, &unavail) {
+			writeLocalErrorWithCoverage(w, r, http.StatusBadGateway, "AGENT_INCIDENTS_UNAVAILABLE", "Agent incident operation failed", unavail.Coverage)
+			return
+		}
 		writeLocalAgentIncidentError(w, r, err)
 		return
 	}
 	w.Header().Set("content-type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(map[string]any{"source": "agent", "payload_policy": "incident records contain factual Agent runtime state only", "incidents": resp.Incidents})
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"source":         "agent",
+		"payload_policy": "incident records contain factual Agent runtime state only",
+		"incidents":      resp.Incidents,
+		"coverage":       coverage,
+	})
 }
 
 func callLocalIncidentGetAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentGetRequest, resolver ...agentConfigResolver) {
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	if agentCfg, err := resolveAgentSnapshot(cfg, resolver...); err == nil {
+		cfg = agentCfg
+	}
+	nodeID := strings.TrimSpace(r.URL.Query().Get("node_id"))
+	pat := optionalPAT(factory)
+	var cloudClient agentclient.NodeLister
+	if client, err := cloudclient.New(cfg.CloudURL, pat, "opsi-local-ui", http.DefaultClient); err == nil && client != nil {
+		cloudClient = client
+	}
+	targetResolver := agentclient.NewAgentTargetResolver(agentclient.AgentTargetResolverOptions{
+		CloudClient: cloudClient,
+		BaseConfig:  cfg,
+		PAT:         pat,
+	})
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	if pat := optionalPAT(factory); pat != "" {
-		ctx = agentclient.WithPAT(ctx, pat)
-	}
-	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+
+	resp, err := targetResolver.GetIncident(ctx, req, nodeID)
 	if err != nil {
-		writeLocalAgentIncidentError(w, r, err)
-		return
-	}
-	resp, err := agentclient.New(agentCfg).GetIncident(ctx, req)
-	if err != nil {
+		var ambig *agentclient.AmbiguousTargetError
+		if errors.As(err, &ambig) {
+			writeLocalError(w, r, http.StatusBadRequest, "NODE_ID_REQUIRED", ambig.Error())
+			return
+		}
+		var unavail *agentclient.TelemetryUnavailableError
+		if errors.As(err, &unavail) {
+			writeLocalErrorWithCoverage(w, r, http.StatusBadGateway, "AGENT_INCIDENTS_UNAVAILABLE", "Agent incident operation failed", unavail.Coverage)
+			return
+		}
 		writeLocalAgentIncidentError(w, r, err)
 		return
 	}
@@ -1349,21 +1452,40 @@ func callLocalIncidentGetAgent(w http.ResponseWriter, r *http.Request, cfg confi
 }
 
 func callLocalIncidentEvidenceAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentGetRequest, resolver ...agentConfigResolver) {
-	ctx, cancel := context.WithTimeout(r.Context(), incidentEvidenceOperationTimeout)
-	defer cancel()
+	if agentCfg, err := resolveAgentSnapshot(cfg, resolver...); err == nil {
+		cfg = agentCfg
+	}
+	nodeID := strings.TrimSpace(r.URL.Query().Get("node_id"))
 	pat, err := resolvePAT("", factory)
 	if err != nil {
 		writeLocalAgentIncidentError(w, r, err)
 		return
 	}
-	ctx = agentclient.WithPAT(ctx, pat)
-	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
-	if err != nil {
-		writeLocalAgentIncidentError(w, r, err)
-		return
+	var cloudClient agentclient.NodeLister
+	if client, err := cloudclient.New(cfg.CloudURL, pat, "opsi-local-ui", http.DefaultClient); err == nil && client != nil {
+		cloudClient = client
 	}
-	response, err := agentclient.New(agentCfg).GetIncidentEvidence(ctx, req)
+	targetResolver := agentclient.NewAgentTargetResolver(agentclient.AgentTargetResolverOptions{
+		CloudClient: cloudClient,
+		BaseConfig:  cfg,
+		PAT:         pat,
+	})
+
+	ctx, cancel := context.WithTimeout(r.Context(), incidentEvidenceOperationTimeout)
+	defer cancel()
+
+	response, err := targetResolver.GetIncidentEvidence(ctx, req, nodeID)
 	if err != nil {
+		var ambig *agentclient.AmbiguousTargetError
+		if errors.As(err, &ambig) {
+			writeLocalError(w, r, http.StatusBadRequest, "NODE_ID_REQUIRED", ambig.Error())
+			return
+		}
+		var unavail *agentclient.TelemetryUnavailableError
+		if errors.As(err, &unavail) {
+			writeLocalErrorWithCoverage(w, r, http.StatusBadGateway, "AGENT_INCIDENTS_UNAVAILABLE", "Agent incident operation failed", unavail.Coverage)
+			return
+		}
 		writeLocalAgentIncidentError(w, r, err)
 		return
 	}
@@ -1378,18 +1500,31 @@ func callLocalIncidentEvidenceAgent(w http.ResponseWriter, r *http.Request, cfg 
 }
 
 func callLocalIncidentResolveAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentResolveRequest, resolver ...agentConfigResolver) {
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	if agentCfg, err := resolveAgentSnapshot(cfg, resolver...); err == nil {
+		cfg = agentCfg
+	}
+	nodeID := strings.TrimSpace(r.URL.Query().Get("node_id"))
+	pat := optionalPAT(factory)
+	var cloudClient agentclient.NodeLister
+	if client, err := cloudclient.New(cfg.CloudURL, pat, "opsi-local-ui", http.DefaultClient); err == nil && client != nil {
+		cloudClient = client
+	}
+	targetResolver := agentclient.NewAgentTargetResolver(agentclient.AgentTargetResolverOptions{
+		CloudClient: cloudClient,
+		BaseConfig:  cfg,
+		PAT:         pat,
+	})
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	if pat := optionalPAT(factory); pat != "" {
-		ctx = agentclient.WithPAT(ctx, pat)
-	}
-	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+
+	resp, err := targetResolver.ResolveIncident(ctx, req, nodeID)
 	if err != nil {
-		writeLocalAgentIncidentError(w, r, err)
-		return
-	}
-	resp, err := agentclient.New(agentCfg).ResolveIncident(ctx, req)
-	if err != nil {
+		var ambig *agentclient.AmbiguousTargetError
+		if errors.As(err, &ambig) {
+			writeLocalError(w, r, http.StatusBadRequest, "NODE_ID_REQUIRED", ambig.Error())
+			return
+		}
 		writeLocalAgentIncidentError(w, r, err)
 		return
 	}
@@ -1402,7 +1537,6 @@ func callLocalIncidentResolveAgent(w http.ResponseWriter, r *http.Request, cfg c
 		"incident":       resp,
 	})
 }
-
 func writeLocalAgentIncidentError(w http.ResponseWriter, r *http.Request, err error) {
 	statusCode := http.StatusBadGateway
 	code := "AGENT_INCIDENT_OPERATION_FAILED"
@@ -1445,60 +1579,88 @@ func localTelemetry(w http.ResponseWriter, r *http.Request, cfg config.Config, f
 		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
 		return true
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-	if pat := optionalPAT(factory); pat != "" {
-		ctx = agentclient.WithPAT(ctx, pat)
-	}
-	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
-	if err != nil {
-		writeLocalAgentTelemetryError(w, r, err)
-		return true
-	}
-	resp, err := agentclient.New(agentCfg).QueryTelemetry(ctx, req)
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("content-type", "application/json")
+
+	if agentCfg, err := resolveAgentSnapshot(cfg, resolver...); err == nil {
+		cfg = agentCfg
+	}
+	pat := optionalPAT(factory)
+	var cloudClient agentclient.NodeLister
+	if client, err := cloudclient.New(cfg.CloudURL, pat, "opsi-local-ui", http.DefaultClient); err == nil && client != nil {
+		cloudClient = client
+	}
+	targetResolver := agentclient.NewAgentTargetResolver(agentclient.AgentTargetResolverOptions{
+		CloudClient: cloudClient,
+		BaseConfig:  cfg,
+		PAT:         pat,
+	})
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	resp, coverage, err := targetResolver.QueryTelemetry(ctx, req)
 	if err != nil {
+		var unavail *agentclient.TelemetryUnavailableError
+		if errors.As(err, &unavail) {
+			writeLocalErrorWithCoverage(w, r, http.StatusBadGateway, "AGENT_TELEMETRY_UNAVAILABLE", "Agent telemetry operation failed", unavail.Coverage)
+			return true
+		}
 		writeLocalAgentTelemetryError(w, r, err)
 		return true
 	}
 	sanitizeTelemetryResponse(resp)
-	if view == "summary" && resp.Summary != nil {
-		_ = json.NewEncoder(w).Encode(telemetrySummary{
+	if view == "summary" {
+		sum := telemetrySummary{
 			ProjectID:     resp.ProjectID,
-			SinceUnix:     resp.Summary.SinceUnix,
-			RecordCount:   int(resp.Summary.MetricCount + resp.Summary.LogCount),
-			StartUnix:     resp.Summary.SinceUnix,
-			EndUnix:       resp.Summary.EndUnix,
 			Done:          true,
 			Source:        "agent",
 			PayloadPolicy: resp.PayloadPolicy,
-			Health:        resp.Summary.Health,
-			MetricCount:   int(resp.Summary.MetricCount),
-			LogCount:      int(resp.Summary.LogCount),
-			ErrorCount:    int(resp.Summary.ErrorCount),
-			ServiceCount:  int(resp.Summary.ServiceCount),
-		})
+			Coverage:      coverage,
+		}
+		if resp.Summary != nil {
+			sum.SinceUnix = resp.Summary.SinceUnix
+			sum.RecordCount = int(resp.Summary.MetricCount + resp.Summary.LogCount)
+			sum.StartUnix = resp.Summary.SinceUnix
+			sum.EndUnix = resp.Summary.EndUnix
+			sum.Health = resp.Summary.Health
+			sum.MetricCount = int(resp.Summary.MetricCount)
+			sum.LogCount = int(resp.Summary.LogCount)
+			sum.ErrorCount = int(resp.Summary.ErrorCount)
+			sum.ServiceCount = int(resp.Summary.ServiceCount)
+		}
+		sum.Services = resp.Services
+		_ = json.NewEncoder(w).Encode(sum)
 		return true
 	}
-	_ = json.NewEncoder(w).Encode(resp)
+	type telemetryQueryResponseWithCoverage struct {
+		*agentv1.TelemetryQueryResponse
+		Coverage *agentclient.TelemetryCoverage `json:"coverage,omitempty"`
+	}
+	_ = json.NewEncoder(w).Encode(telemetryQueryResponseWithCoverage{
+		TelemetryQueryResponse: resp,
+		Coverage:               coverage,
+	})
 	return true
 }
 
 type telemetrySummary struct {
-	ProjectID     string `json:"project_id"`
-	SinceUnix     int64  `json:"since_unix"`
-	ChunkCount    int    `json:"chunk_count"`
-	RecordCount   int    `json:"record_count"`
-	StartUnix     int64  `json:"start_unix"`
-	EndUnix       int64  `json:"end_unix"`
-	Done          bool   `json:"done"`
-	Source        string `json:"source"`
-	PayloadPolicy string `json:"payload_policy"`
-	Health        string `json:"health,omitempty"`
-	MetricCount   int    `json:"metric_count,omitempty"`
-	LogCount      int    `json:"log_count,omitempty"`
-	ErrorCount    int    `json:"error_count,omitempty"`
-	ServiceCount  int    `json:"service_count,omitempty"`
+	ProjectID     string                           `json:"project_id"`
+	SinceUnix     int64                            `json:"since_unix"`
+	ChunkCount    int                              `json:"chunk_count"`
+	RecordCount   int                              `json:"record_count"`
+	StartUnix     int64                            `json:"start_unix"`
+	EndUnix       int64                            `json:"end_unix"`
+	Done          bool                             `json:"done"`
+	Source        string                           `json:"source"`
+	PayloadPolicy string                           `json:"payload_policy"`
+	Health        string                           `json:"health,omitempty"`
+	MetricCount   int                              `json:"metric_count,omitempty"`
+	LogCount      int                              `json:"log_count,omitempty"`
+	ErrorCount    int                              `json:"error_count,omitempty"`
+	ServiceCount  int                              `json:"service_count,omitempty"`
+	Coverage      *agentclient.TelemetryCoverage   `json:"coverage,omitempty"`
+	Services      []agentv1.TelemetryServiceStatus `json:"services,omitempty"`
 }
 
 func localTelemetryRequest(w http.ResponseWriter, r *http.Request) (*agentv1.TelemetryQueryRequest, string, bool) {
@@ -1513,6 +1675,20 @@ func localTelemetryRequest(w http.ResponseWriter, r *http.Request) (*agentv1.Tel
 	}
 	query := r.URL.Query()
 	sinceUnix, _ := strconv.ParseInt(query.Get("since_unix"), 10, 64)
+	if sinceUnix <= 0 {
+		window := strings.ToLower(strings.TrimSpace(query.Get("window")))
+		now := time.Now().UTC()
+		switch window {
+		case "24h":
+			sinceUnix = now.Add(-24 * time.Hour).Unix()
+		case "6h":
+			sinceUnix = now.Add(-6 * time.Hour).Unix()
+		case "1h":
+			sinceUnix = now.Add(-1 * time.Hour).Unix()
+		default:
+			sinceUnix = now.Add(-1 * time.Hour).Unix()
+		}
+	}
 	limit, _ := strconv.ParseInt(query.Get("limit"), 10, 32)
 	req := &agentv1.TelemetryQueryRequest{ProjectID: projectID, SinceUnix: sinceUnix, Cursor: query.Get("cursor"), Limit: int32(limit)}
 	switch {
@@ -1520,16 +1696,6 @@ func localTelemetryRequest(w http.ResponseWriter, r *http.Request) (*agentv1.Tel
 		req.IncludeSummary = true
 		req.IncludeServices = true
 		return req, "summary", true
-	case len(parts) == 7 && parts[4] == "telemetry" && parts[5] == "services":
-		serviceID, err := url.PathUnescape(parts[6])
-		if err != nil || serviceID == "" {
-			writeLocalError(w, r, http.StatusBadRequest, "SERVICE_ID_REQUIRED", "service_id is required")
-			return nil, "", true
-		}
-		req.ServiceID = serviceID
-		req.IncludeSummary = true
-		req.IncludeServices = true
-		return req, "service", true
 	case len(parts) == 5 && parts[4] == "logs":
 		req.ServiceID = query.Get("service_id")
 		req.IncludeLogs = true

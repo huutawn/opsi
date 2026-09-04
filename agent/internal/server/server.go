@@ -349,6 +349,16 @@ func (s *TelemetryService) QueryTelemetry(ctx context.Context, req *agentv1.Tele
 		}
 		req.SinceUnix = cursor.Unix()
 	}
+	now := time.Now().UTC()
+	if req.SinceUnix <= 0 && req.Cursor == "" {
+		req.SinceUnix = now.Add(-1 * time.Hour).Unix()
+	}
+	if req.SinceUnix > 0 {
+		since := time.Unix(req.SinceUnix, 0).UTC()
+		if now.Sub(since) > 24*time.Hour+time.Minute {
+			return nil, status.Error(codes.InvalidArgument, "telemetry query window cannot exceed 24 hours")
+		}
+	}
 	if !req.IncludeLogs && !req.IncludeSummary && !req.IncludeServices {
 		return nil, status.Error(codes.InvalidArgument, "at least one telemetry view must be requested")
 	}
@@ -357,8 +367,11 @@ func (s *TelemetryService) QueryTelemetry(ctx context.Context, req *agentv1.Tele
 			return nil, err
 		}
 	}
-	resp, err := telemetry.BuildQueryResponse(ctx, s.store, req, time.Now().UTC())
+	resp, err := telemetry.BuildQueryResponse(ctx, s.store, req, now)
 	if err != nil {
+		if _, ok := status.FromError(err); ok {
+			return nil, err
+		}
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	return resp, nil

@@ -1,5 +1,6 @@
 import { Icon } from "@/components/ui/primitives";
 import type { DeploymentRun, DeploymentRunEvent, DeploymentRunState } from "@/lib/contracts/registry";
+import { useI18n } from "@/lib/i18n";
 
 const phases: Array<{ state: DeploymentRunState; label: string; icon: string }> = [
   { state: "building", label: "Build", icon: "layers" },
@@ -11,6 +12,7 @@ const phases: Array<{ state: DeploymentRunState; label: string; icon: string }> 
 const order: DeploymentRunState[] = ["analyzing", "awaiting_input", "awaiting_approval", "provisioning", "building", "preflighting", "awaiting_warning_ack", "deploying", "verifying", "succeeded"];
 
 export function DeploymentTimeline({ events, run }: { events: DeploymentRunEvent[]; run: DeploymentRun }) {
+  const { formatDate } = useI18n();
   const current = order.indexOf(run.state);
   return (
     <section aria-labelledby="run-timeline-title" className="space-y-5">
@@ -35,7 +37,7 @@ export function DeploymentTimeline({ events, run }: { events: DeploymentRunEvent
           <li className="relative pb-5 last:pb-0" key={event.id}>
             <span className={`absolute -left-[1.55rem] top-1.5 h-2 w-2 rounded-full ${event.level === "error" ? "bg-status-failed" : "bg-secondary"}`} />
             <p className="text-sm text-on-surface">{event.message}</p>
-            <p className="mt-1 text-xs text-on-surface-variant"><time dateTime={event.created_at}>{new Date(event.created_at).toLocaleString()}</time> · {event.state.replaceAll("_", " ")}</p>
+            <p className="mt-1 text-xs text-on-surface-variant"><time dateTime={event.created_at}>{formatDate(event.created_at)}</time> · {event.state.replaceAll("_", " ")}</p>
           </li>
         ))}
       </ol>

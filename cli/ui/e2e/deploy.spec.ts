@@ -450,8 +450,8 @@ test("external secret input is submitted once and removed from rendered state", 
 	await input.fill("one-time-browser-secret");
 	await page.getByRole("button", { name: "Store securely" }).click();
 	await expect.poll(() => secretPayload).toEqual({ logical_name: "oauth-client", value: "one-time-browser-secret" });
-	await expect(input).toHaveValue("");
-	await expect(page.getByText("Reference revision 1")).toBeVisible();
+	await expect(input).toHaveCount(0);
+	await expect(page.getByText("oauth-client · Stored securely · revision 1", { exact: true })).toBeVisible();
 	expect(await page.locator("body").innerText()).not.toContain("one-time-browser-secret");
 });
 
@@ -488,6 +488,108 @@ test("failed run at the retry limit offers a new deployment instead of an invali
 	await expect(page.getByRole("button", { name: "Export configuration" })).toHaveCount(0);
 	await page.getByRole("button", { name: "New deployment" }).last().click();
 	await expect(page.getByRole("heading", { name: "Choose a repository to deploy" })).toBeVisible();
+});
+
+test("multi-app runtime configuration enforces review gating, generated key sufficiency, and confirmation", async ({ page }) => {
+	const run = deploymentRun("awaiting_approval");
+	run.plan.application_environment_reviews = [];
+	await mockDeployAPI(page, () => run, () => run, "owner");
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await expect(page.getByText('Review required: "identity-web" requires runtime configuration or confirmation.')).toBeVisible();
+	await expect(page.getByRole("button", { name: "Approve & Deploy" })).toBeDisabled();
+
+	await page.getByText("View or edit full detected configuration").click();
+	await expect(page.getByRole("link", { name: "Review identity-web" })).toBeVisible();
+
+	const apiRuntime = page.locator("#application-runtime-0");
+	await expect(apiRuntime.getByText("2 runtime keys")).toBeVisible();
+	const webRuntime = page.locator("#application-runtime-1");
+	await expect(webRuntime.getByText("Needs review")).toBeVisible();
+
+	const confirmCheck = webRuntime.getByLabel("This application does not require environment variables or secrets.");
+	await expect(confirmCheck).toBeVisible();
+	await expect(confirmCheck).not.toBeChecked();
+
+	await confirmCheck.check();
+	await expect(webRuntime.getByText("No keys required — confirmed")).toBeVisible();
+	await expect(page.getByText('Review required: "identity-web" requires runtime configuration or confirmation.')).toHaveCount(0);
+});
+
+test("removing the last runtime key forces confirmation review again and blocks save", async ({ page }) => {
+	const run = deploymentRun("awaiting_approval");
+	run.plan.applications[1].environment = { FEATURE_FLAG: "true" };
+	run.plan.application_environment_reviews = [];
+	await mockDeployAPI(page, () => run, () => run, "owner");
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await page.getByText("View or edit full detected configuration").click();
+
+	const webRuntime = page.locator("#application-runtime-1");
+	await expect(webRuntime.getByText("1 runtime key")).toBeVisible();
+	await expect(webRuntime.getByText("FEATURE_FLAG")).toBeVisible();
+
+	await webRuntime.getByRole("button", { name: "Remove" }).click();
+	await expect(webRuntime.getByText("Needs review")).toBeVisible();
+	await expect(page.getByRole("button", { name: "Save Draft" })).toBeDisabled();
+});
+
+test("plain environment blocks secret-like names and directs to Add secret", async ({ page }) => {
+	const run = deploymentRun("awaiting_approval");
+	await mockDeployAPI(page, () => run, () => run, "owner");
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await page.getByText("View or edit full detected configuration").click();
+
+	const apiRuntime = page.locator("#application-runtime-0");
+	const keyInput = apiRuntime.getByPlaceholder("VARIABLE_NAME");
+	await keyInput.fill("DATABASE_PASSWORD");
+	const valInput = apiRuntime.getByPlaceholder("value");
+	await valInput.fill("secret123");
+	await apiRuntime.getByRole("button", { name: "Add variable" }).click();
+
+	await expect(apiRuntime.getByText("Secret-like keys such as PASSWORD, API_KEY, and TOKEN must use Add secret.")).toBeVisible();
+});
+
+test("secret value crosses the one-way API once and only metadata enters the deployment plan", async ({ page }) => {
+	const run = deploymentRun("awaiting_approval");
+	run.plan.applications[1].environment = {};
+	run.plan.application_environment_reviews = [];
+	let secretRequest: Record<string, unknown> | undefined;
+	let savedPlan: Record<string, unknown> | undefined;
+	await mockDeployAPI(page, () => run, () => run, "owner", (body) => {
+		secretRequest = body;
+		return { id: "wsecret-web", reference: "workload-secret://wsecret-web", project_id: "proj-1", service_id: "planned:identity-web", logical_name: String(body.logical_name), revision: 1, status: "ready", updated_at: "2026-09-04T00:00:00Z" };
+	}, { repository: () => sourceRepository("active"), onPlanUpdate: (body) => { savedPlan = body.plan as Record<string, unknown>; return { ...run, plan: body.plan as DeploymentRun["plan"], revision: run.revision + 1 }; } });
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await page.getByText("View or edit full detected configuration").click();
+	const runtime = page.locator("#application-runtime-1");
+	await runtime.getByRole("button", { name: "Add secret" }).click();
+	await runtime.getByLabel("Environment key").fill("SESSION_SECRET");
+	await runtime.getByLabel("Logical secret name").fill("session-secret");
+	await runtime.getByLabel("Secret value").fill("one-way-value");
+	await runtime.getByRole("button", { name: "Store securely" }).click();
+
+	await expect(runtime.getByText("Stored securely · revision 1")).toBeVisible();
+	expect(secretRequest).toEqual({ logical_name: "session-secret", value: "one-way-value" });
+	await page.getByRole("button", { name: "Save Draft" }).click();
+	await expect.poll(() => savedPlan).toBeTruthy();
+	expect(JSON.stringify(savedPlan)).not.toContain("one-way-value");
+	expect(JSON.stringify(savedPlan)).toContain("workload-secret://wsecret-web");
+});
+
+test("viewer role sees runtime configuration metadata but no edit controls", async ({ page }) => {
+	const run = deploymentRun("awaiting_approval");
+	await mockDeployAPI(page, () => run, () => run, "viewer");
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await page.getByText("View or edit full detected configuration").click();
+
+	const apiRuntime = page.locator("#application-runtime-0");
+	await expect(apiRuntime.getByText("2 runtime keys")).toBeVisible();
+	await expect(apiRuntime.getByRole("button", { name: "Add variable" })).toHaveCount(0);
+	await expect(apiRuntime.getByRole("button", { name: "Add secret" })).toHaveCount(0);
 });
 
 test("available repository is claimed and analyzed without a page reload", async ({ page }) => {
@@ -613,6 +715,7 @@ async function mockDeployAPI(page: Page, current: () => ReturnType<typeof deploy
 		const path = new URL(request.url()).pathname;
 		let body: unknown = {};
 		if (/\/workload-secrets$/.test(path) && request.method() === "PUT" && secretAction) body = { workload_secret: secretAction(request.postDataJSON()), reused: false };
+		else if (/\/workload-secrets$/.test(path) && request.method() === "GET") body = { workload_secrets: [] };
 		else if (path === "/api/local/session/login/start" && request.method() === "POST" && source) { source.onLoginStart?.(); const login = request.postDataJSON(); const query = new URLSearchParams(String(login.return_query || "")); query.set("project", "proj-1"); query.set("view", "deploy"); query.set("auth", "ok"); body = { auth_url: "/?" + query.toString(), status: "pending" }; }
 		else if (path === "/api/local/session/selection" && authSelection) body = { selection_id: "selection-1", projects: [{ id: "proj-1", name: "dada", role }] };
 		else if (path === "/api/local/session/select-project" && request.method() === "POST" && authSelection) { authSelection.authenticated = true; authSelection.selections += 1; body = { authenticated: true, session: { user_id: "user-1", org_id: "org-1", project_id: "proj-1", role } }; }
@@ -704,9 +807,9 @@ function resourceRecommendation(basisHash: string) {
 
 function deploymentRun(state: "awaiting_input" | "awaiting_approval" | "awaiting_warning_ack" | "provisioning" | "building" | "deploying" | "succeeded" | "failed" | "stale" | "cancelled"): DeploymentRun {
 	return {
-		schema_version: "opsi.deployment_run/v2", id: "run-1", project_id: "proj-1", created_by: "user-1", state,
+		schema_version: "opsi.deployment_run/v3", id: "run-1", project_id: "proj-1", created_by: "user-1", state,
 		plan: {
-			schema_version: "opsi.deployment_plan/v2", hash: hash("a"),
+			schema_version: "opsi.deployment_plan/v3", hash: hash("a"),
 			source: { repository_id: 7, installation_id: 9, repository: "acme/identity-service", selected_ref: "main", commit_sha: hash("d").slice(0, 40) },
 			applications: [
 				{ source_key: "api", key: "identity-api", name: "identity-api", root: "be", port: 8080, build: { context: "be", dockerfile_path: "be/Dockerfile", strategy: "dockerfile", platform: "linux/amd64" }, confidence: "high", reason: "Dockerfile", evidence: [] },
@@ -716,6 +819,7 @@ function deploymentRun(state: "awaiting_input" | "awaiting_approval" | "awaiting
 			dependencies: [{ from: "identity-api", to: "postgres", protocol: "postgres", required: true, confidence: "high", reason: "Compose", evidence: [], injections: [{ environment_name: "ConnectionStrings__Database", symbolic_source: "connection.postgres.npgsql" }] }, { from: "identity-web", to: "identity-api", protocol: "http", strategy: "same_origin", path: "/api", required: true, verification: { type: "consumer_http", path: "/health", expected_status: 200 }, confidence: "high", reason: "Route", evidence: [] }],
 			bindings: [{ from: "identity-web", to: "identity-api", kind: "browser_http", path: "/api", confidence: "high", reason: "Route", evidence: [] }],
 			secrets: [{ name: "jwt-signing-key", application_key: "identity-api", environment_name: "Jwt__SigningKey", generated: true, secret_ref: "generated://jwt-signing-key", revision: 0, display: "Generated and securely stored", confidence: "high", reason: "Configuration", evidence: [] }],
+			application_environment_reviews: [{ application_source_key: "web", no_environment_required: true }],
 			issues: [], analysis_scope: { application_roots: [], exclude_paths: [] }, analysis_scope_hash: hash("s"), evidence_coverage: { candidates_found: 6, candidates_selected: 6, files_inspected: 6, bytes_inspected: 2048 }, target: { environment_id: "env-1", runtime_id: "runtime-1", node_id: "node-1", hostname: "identity.test.opsidev.site", exposure: "public", public_routes: "automatic", cpu_milli: 250, memory_bytes: 268435456 }, authority_revisions: { source_commit_sha: hash("d").slice(0, 40) }, failure_policy: { fail_fast: true, rollback_known_good: true, retain_persistent_data: true, max_attempts: 3 },
 		},
 		analysis: { authority: "compose", issues: [], files_inspected: 6, bytes_inspected: 2048, truncated: false }, authority_refs: { checkpoints: [] }, preflight_hash: state === "awaiting_warning_ack" ? hash("p") : undefined, failure: state === "failed" ? { step: "building", code: "BUILD_AUTHORITY_UNAVAILABLE", message: "Build authority unavailable.", next_action: "Retry the failed step.", retryable: true } : state === "stale" ? { step: "preflighting", code: "DEPLOYMENT_PLAN_STALE", message: "An authority changed.", next_action: "Analyze and review again.", retryable: false } : undefined, attempt: state === "awaiting_approval" ? 0 : 1, revision: state === "awaiting_approval" ? 3 : 4, created_at: "2026-08-24T00:00:00Z", updated_at: "2026-08-24T00:00:00Z",

@@ -485,6 +485,21 @@ func TestMCPTools_AllReadToolsAcceptance(t *testing.T) {
 		t.Errorf("expected project_id in result, got: %s", res.Content[0].Text)
 	}
 
+	// Project review composes existing authorities and stays explicitly non-operational.
+	res = callTool("project_review_context", map[string]any{"project_id": projectID})
+	if res.IsError || !strings.Contains(res.Content[0].Text, `"action": "NONE"`) || !strings.Contains(res.Content[0].Text, "web-api") {
+		t.Fatalf("project_review_context failed: %s", res.Content[0].Text)
+	}
+
+	// A stale complete-configuration proposal is rejected before any preview,
+	// diff, persistence, or apply call can occur.
+	res = callTool("validate_service_configuration_proposal", map[string]any{"proposal": map[string]any{
+		"project_id": projectID, "application_id": "svc-web-1", "expected_revision": 4, "expected_state_hash": "old-state",
+		"draft": map[string]any{"schema_version": serviceconfigurationv1.SchemaVersion, "environment": []map[string]any{{"name": "LOG_LEVEL", "value": "debug"}}},
+	}})
+	if res.IsError || !strings.Contains(res.Content[0].Text, `"status": "STALE"`) || !strings.Contains(res.Content[0].Text, `"action": "NONE"`) {
+		t.Fatalf("validate_service_configuration_proposal did not fail closed: %s", res.Content[0].Text)
+	}
 	// 2. topology
 	res = callTool("topology", map[string]any{"project_id": projectID})
 	if res.IsError || !strings.Contains(res.Content[0].Text, "web-api") {
@@ -622,4 +637,169 @@ func TestMCPTools_UnauthenticatedAndAmbiguousErrors(t *testing.T) {
 	if !ok || !res.IsError || !strings.Contains(res.Content[0].Text, ErrCodeAuthRequired) {
 		t.Fatalf("expected AUTH_REQUIRED error when PAT is missing, got: %+v", resp)
 	}
+}
+
+func TestDeploymentsList_StructuredErrors_AuthForbiddenUnavailable(t *testing.T) {
+	secretPAT := "opsi_pat_super_secret_token_123456789"
+	secretHeader := "Bearer secret_header_value_987654321"
+
+	// 1. Auth required (missing PAT)
+	t.Run("auth_required", func(t *testing.T) {
+		cfgDir := t.TempDir()
+		cfgPath := filepath.Join(cfgDir, "cli.yaml")
+		_ = os.WriteFile(cfgPath, []byte("cloud_url: https://example.com\n"), 0600)
+		server := NewServer(ServerOptions{
+			Version:          "1.0.0-test",
+			ConfigPath:       cfgPath,
+			DefaultProjectID: "proj-1",
+			KeychainFactory: func() (keychain.Store, error) {
+				return &memoryKeychain{pat: ""}, nil
+			},
+		})
+		reqBytes, _ := json.Marshal(JSONRPCRequest{
+			JSONRPC: "2.0",
+			ID:      1,
+			Method:  "tools/call",
+			Params:  json.RawMessage(`{"name":"deployments_list","arguments":{"project_id":"proj-1"}}`),
+		})
+		resp, err := server.HandleMessage(context.Background(), reqBytes)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		res, ok := resp.Result.(CallToolResult)
+		if !ok || !res.IsError {
+			t.Fatalf("expected error CallToolResult, got %+v", resp.Result)
+		}
+		if res.StructuredContent == nil {
+			t.Fatal("expected StructuredContent to be non-nil")
+		}
+		if res.StructuredContent.Code != ErrCodeAuthRequired {
+			t.Errorf("expected code %s, got %s", ErrCodeAuthRequired, res.StructuredContent.Code)
+		}
+		if res.StructuredContent.Retryable {
+			t.Errorf("expected auth error to not be retryable")
+		}
+		if res.StructuredContent.NextAction == "" {
+			t.Errorf("expected non-empty next_action")
+		}
+		// Verify content.text backward compatibility
+		if len(res.Content) == 0 || !strings.Contains(res.Content[0].Text, ErrCodeAuthRequired) {
+			t.Errorf("expected content.text to contain %s, got: %v", ErrCodeAuthRequired, res.Content)
+		}
+		// Verify no PAT/secret in output
+		if strings.Contains(res.Content[0].Text, secretPAT) || strings.Contains(res.StructuredContent.Message, secretPAT) {
+			t.Errorf("PAT leaked into output")
+		}
+	})
+
+	// 2. Forbidden (403 from Cloud)
+	t.Run("forbidden", func(t *testing.T) {
+		cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Custom-Secret-Header", secretHeader)
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"code":"FORBIDDEN","message":"permission denied for project"}`))
+		}))
+		defer cloud.Close()
+
+		cfgDir := t.TempDir()
+		cfgPath := filepath.Join(cfgDir, "cli.yaml")
+		_ = os.WriteFile(cfgPath, []byte(fmt.Sprintf("cloud_url: %s\n", cloud.URL)), 0600)
+		server := NewServer(ServerOptions{
+			Version:          "1.0.0-test",
+			ConfigPath:       cfgPath,
+			DefaultProjectID: "proj-1",
+			KeychainFactory: func() (keychain.Store, error) {
+				return &memoryKeychain{pat: secretPAT}, nil
+			},
+		})
+		reqBytes, _ := json.Marshal(JSONRPCRequest{
+			JSONRPC: "2.0",
+			ID:      2,
+			Method:  "tools/call",
+			Params:  json.RawMessage(`{"name":"deployments_list","arguments":{"project_id":"proj-1"}}`),
+		})
+		resp, err := server.HandleMessage(context.Background(), reqBytes)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		res, ok := resp.Result.(CallToolResult)
+		if !ok || !res.IsError {
+			t.Fatalf("expected error CallToolResult, got %+v", resp.Result)
+		}
+		if res.StructuredContent == nil {
+			t.Fatal("expected StructuredContent to be non-nil")
+		}
+		if res.StructuredContent.Code != ErrCodeForbidden {
+			t.Errorf("expected code %s, got %s", ErrCodeForbidden, res.StructuredContent.Code)
+		}
+		if res.StructuredContent.Retryable {
+			t.Errorf("expected forbidden error to not be retryable")
+		}
+		if res.StructuredContent.NextAction == "" {
+			t.Errorf("expected non-empty next_action")
+		}
+		// Verify no PAT or header leak
+		if strings.Contains(res.Content[0].Text, secretPAT) || strings.Contains(res.StructuredContent.Message, secretPAT) {
+			t.Errorf("PAT leaked into output")
+		}
+		if strings.Contains(res.Content[0].Text, secretHeader) || strings.Contains(res.StructuredContent.Message, secretHeader) {
+			t.Errorf("secret header leaked into output")
+		}
+	})
+
+	// 3. Cloud unavailable (500 or broken connection)
+	t.Run("cloud_unavailable", func(t *testing.T) {
+		cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"code":"INTERNAL_SERVER_ERROR","message":"internal database failure: secret token ` + secretPAT + `"}`))
+		}))
+		defer cloud.Close()
+
+		cfgDir := t.TempDir()
+		cfgPath := filepath.Join(cfgDir, "cli.yaml")
+		_ = os.WriteFile(cfgPath, []byte(fmt.Sprintf("cloud_url: %s\n", cloud.URL)), 0600)
+		server := NewServer(ServerOptions{
+			Version:          "1.0.0-test",
+			ConfigPath:       cfgPath,
+			DefaultProjectID: "proj-1",
+			KeychainFactory: func() (keychain.Store, error) {
+				return &memoryKeychain{pat: secretPAT}, nil
+			},
+		})
+		reqBytes, _ := json.Marshal(JSONRPCRequest{
+			JSONRPC: "2.0",
+			ID:      3,
+			Method:  "tools/call",
+			Params:  json.RawMessage(`{"name":"deployments_list","arguments":{"project_id":"proj-1"}}`),
+		})
+		resp, err := server.HandleMessage(context.Background(), reqBytes)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		res, ok := resp.Result.(CallToolResult)
+		if !ok || !res.IsError {
+			t.Fatalf("expected error CallToolResult, got %+v", resp.Result)
+		}
+		if res.StructuredContent == nil {
+			t.Fatal("expected StructuredContent to be non-nil")
+		}
+		if res.StructuredContent.Code != ErrCodeAuthorityUnavailable {
+			t.Errorf("expected code %s, got %s", ErrCodeAuthorityUnavailable, res.StructuredContent.Code)
+		}
+		if !res.StructuredContent.Retryable {
+			t.Errorf("expected cloud unavailable to be retryable")
+		}
+		if res.StructuredContent.NextAction == "" {
+			t.Errorf("expected non-empty next_action")
+		}
+		// Verify no PAT or header leak
+		if strings.Contains(res.Content[0].Text, secretPAT) || strings.Contains(res.StructuredContent.Message, secretPAT) {
+			t.Errorf("PAT leaked into output")
+		}
+		if strings.Contains(res.Content[0].Text, secretHeader) || strings.Contains(res.StructuredContent.Message, secretHeader) {
+			t.Errorf("secret header leaked into output")
+		}
+	})
 }

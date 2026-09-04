@@ -5,7 +5,7 @@ import { routeHref, type ConsoleRoute } from "@/features/console/navigation";
 import type { Project } from "@/lib/contracts/registry";
 import { ProjectSwitcher } from "./project-switcher";
 import { Icon } from "@/components/ui/primitives";
-
+import { useI18n } from "@/lib/i18n";
 export function Sidebar({
   agentConnected,
   cloudConnected,
@@ -41,6 +41,7 @@ export function Sidebar({
   projects: Project[];
   route: ConsoleRoute;
 }) {
+  const { t } = useI18n();
   const projectID = project?.id ?? "";
   const navigate = (event: MouseEvent<HTMLAnchorElement>, target: Partial<ConsoleRoute>) => {
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -50,9 +51,10 @@ export function Sidebar({
   };
 
   const projectDestinations = [
-    { id: "deploy", label: "Deploy", icon: "rocket_launch" },
-    { id: "observability", label: "Observability", icon: "monitoring" },
-    { id: "security", label: "Security", icon: "security" },
+    { id: "deploy", label: t("nav.deploy", "Deploy"), icon: "rocket_launch" },
+    { id: "assistant", label: t("nav.assistant", "AI Assistant"), icon: "hub" },
+    { id: "observability", label: t("nav.observability", "Observability"), icon: "monitoring" },
+    { id: "security", label: t("nav.security", "Security"), icon: "security" },
   ] as const;
 
   const systemLive = cloudConnected === "ok" && (!project || agentConnected === "ok");
@@ -91,7 +93,7 @@ export function Sidebar({
           </a>
           {open && (
             <button
-              aria-label="Close navigation"
+              aria-label={t("nav.close_navigation", "Close navigation")}
               className="lg:hidden p-2 text-on-surface-variant hover:text-on-surface rounded-lg hover:bg-surface-container-highest transition-colors min-h-[40px] min-w-[40px]"
               onClick={onClose}
               type="button"
@@ -112,14 +114,14 @@ export function Sidebar({
           {project && environments.length > 0 && (
             <div className="bg-surface-container-high rounded-xl p-2 flex items-center border border-outline-variant/20 relative">
               <div className="flex-1 px-2 py-1">
-                <span className="text-[11px] text-on-surface-variant uppercase tracking-wider block font-medium">Environment</span>
+                <span className="text-[11px] text-on-surface-variant uppercase tracking-wider block font-medium">{t("nav.environment", "Environment")}</span>
                 <select
-                  aria-label="Current environment"
+                  aria-label={t("nav.current_environment", "Current environment")}
                   className="environmentPicker w-full bg-transparent text-sm text-on-surface font-medium border-0 p-0 focus:outline-none appearance-none cursor-pointer min-h-[40px]"
                   onChange={(e) => onEnvironment(e.target.value)}
                   value={environmentID}
                 >
-                  <option value="" className="bg-surface-container-high text-on-surface">Choose environment</option>
+                  <option value="" className="bg-surface-container-high text-on-surface">{t("nav.choose_environment", "Choose environment")}</option>
                   {environments.map((item) => (
                     <option key={item.id} value={item.id} className="bg-surface-container-high text-on-surface">{item.name}</option>
                   ))}
@@ -133,13 +135,14 @@ export function Sidebar({
         <nav className="navSection flex-1 px-3 py-2 space-y-1 overflow-y-auto">
           {!project ? (
             <>
-              <NavItem active={route.view === "home"} href={routeHref({ view: "home" })} icon="home" label="Home" onClick={(e) => navigate(e, { view: "home", projectID: "" })} />
-              <NavItem active={route.view === "projects"} href={routeHref({ view: "projects" })} icon="grid_view" label="Projects" onClick={(e) => navigate(e, { view: "projects", projectID: "" })} />
+              <NavItem active={route.view === "home"} href={routeHref({ view: "home" })} icon="home" label={t("nav.home", "Home")} onClick={(e) => navigate(e, { view: "home", projectID: "" })} />
+              <NavItem active={route.view === "projects"} href={routeHref({ view: "projects" })} icon="grid_view" label={t("nav.projects", "Projects")} onClick={(e) => navigate(e, { view: "projects", projectID: "" })} />
             </>
           ) : (
             projectDestinations.map((item) => {
               const iconMap: Record<string, string> = {
                 deploy: "rocket_launch",
+                assistant: "hub",
                 observability: "monitoring",
                 security: "security",
               };
@@ -162,14 +165,14 @@ export function Sidebar({
             active={route.view === "settings"}
             href={routeHref({ ...route, projectID, view: "settings", tab: "general" })}
             icon="settings"
-            label="Settings"
+            label={t("nav.settings", "Settings")}
             onClick={(e) => navigate(e, { projectID, view: "settings", tab: "general" })}
           />
           <div className={`flex items-center gap-3 p-3 rounded-xl border ${systemLive ? "bg-state-live-bg border-border-live/40" : "bg-surface-container border-status-warning/30"}`}>
             <div className={`w-2.5 h-2.5 rounded-full ${systemLive ? "bg-status-ready animate-pulse" : "bg-status-warning"}`} />
             <div className="flex flex-col min-w-0">
               <span className={`text-xs font-semibold ${systemLive ? "text-border-live" : "text-status-warning"}`}>
-                {systemLive ? "SYSTEM LIVE" : "SYSTEM DEGRADED"}
+                {systemLive ? t("status.system_live", "SYSTEM LIVE") : t("status.system_degraded", "SYSTEM DEGRADED")}
               </span>
               <span className="text-[11px] text-on-surface-variant font-mono truncate">
                 {project ? `${environment || "Prod"} • ${project.slug || project.id}` : orgID || "Ready"}

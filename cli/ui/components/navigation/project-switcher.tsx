@@ -3,6 +3,7 @@
 import { routeHref } from "@/features/console/navigation";
 import type { Project } from "@/lib/contracts/registry";
 import { Icon } from "@/components/ui/primitives";
+import { useI18n } from "@/lib/i18n";
 import { useRef, MouseEvent } from "react";
 
 export function ProjectSwitcher({
@@ -18,6 +19,7 @@ export function ProjectSwitcher({
   onBrowse: () => void;
   onSelect: (projectID: string) => void;
 }) {
+  const { t } = useI18n();
   const menu = useRef<HTMLDetailsElement>(null);
 
   function choose(event: MouseEvent<HTMLAnchorElement>, projectID?: string) {
@@ -40,15 +42,15 @@ export function ProjectSwitcher({
       ref={menu}
     >
       <summary
-        aria-label="Switch project"
+        aria-label={t("nav.switch_project", "Switch project")}
         className="bg-surface-container-high rounded-xl p-2 flex items-center justify-between gap-2 border border-outline-variant/20 cursor-pointer list-none hover:border-outline-variant/50 transition-colors min-h-[40px]"
       >
         <div className="flex-1 flex flex-col min-w-0 px-2 py-1">
           <span className="text-[11px] font-medium text-on-surface-variant uppercase tracking-wider truncate">
-            {project ? "Project" : "Workspace"}
+            {project ? t("nav.project", "Project") : t("nav.workspace", "Workspace")}
           </span>
           <span className="text-sm font-semibold text-on-surface truncate">
-            {project?.name || "All Projects"}
+            {project?.name || t("nav.all_projects", "All Projects")}
           </span>
           <span className="text-[10px] font-mono text-on-surface-variant/70 truncate">
             {project?.slug || orgID || "Organization"}
@@ -59,7 +61,7 @@ export function ProjectSwitcher({
 
       <div className="absolute top-[calc(100%+6px)] left-0 w-full bg-surface-container border border-outline-variant/30 rounded-xl shadow-2xl p-2 z-50 flex flex-col gap-1 max-h-72 overflow-y-auto">
         <div className="px-3 py-1.5 text-[10px] text-on-surface-variant uppercase tracking-wider border-b border-outline-variant/20 mb-1 font-medium">
-          Projects
+          {t("nav.projects", "Projects")}
         </div>
         {projects.map((item) => (
           <a
@@ -83,7 +85,7 @@ export function ProjectSwitcher({
             className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest transition-colors"
           >
             <Icon name="grid_view" className="text-[16px]" />
-            Browse all projects
+            {t("nav.browse_all_projects", "Browse all projects")}
           </a>
         </div>
       </div>

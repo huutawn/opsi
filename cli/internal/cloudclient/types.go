@@ -323,8 +323,7 @@ type ProposalReviewCreateRequest struct {
 	AnalysisInputsHash string                     `json:"analysis_inputs_hash"`
 	SourceCommit       string                     `json:"source_commit,omitempty"`
 	ApplicationRoot    string                     `json:"application_root,omitempty"`
-	DependencyDraft    *ServiceConfigurationDraft `json:"dependency_draft,omitempty"`
-	SourcePatch        json.RawMessage            `json:"source_patch,omitempty"`
+	ConfigurationDraft *ServiceConfigurationDraft `json:"configuration_draft,omitempty"`
 }
 
 type ServiceConfigurationApplyResult struct {

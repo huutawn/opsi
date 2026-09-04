@@ -327,6 +327,12 @@ func IsSecretLikeEnvironmentName(value string) bool {
 	return false
 }
 
+// IsValidEnvironmentName reports whether name can be used as a workload
+// environment variable at API and plan boundaries.
+func IsValidEnvironmentName(name string) bool {
+	return envNamePattern.MatchString(name)
+}
+
 func validateProbe(probe *Probe, containerPort, maxFailureThreshold int32) error {
 	if probe == nil {
 		return nil

@@ -93,7 +93,7 @@ export function useConsoleState() {
     return generation.current === operation && selectedProject.current === selectedProjectID;
   }
 
-  async function loadProjectSummaries(projects: typeof state.projects, agentStatus: string, operation: number, force = false) {
+  async function loadProjectSummaries(projects: typeof state.projects, operation: number, force = false) {
     if (!isCurrent(operation, "")) return;
     const now = Date.now();
     const projectIDs = new Set(projects.map((project) => project.id));
@@ -120,7 +120,7 @@ export function useConsoleState() {
         const project = pending[cursor++];
         if (!project) return;
         try {
-          const entry = await loadProjectSummary(client, project, agentStatus, run);
+          const entry = await loadProjectSummary(client, project, run);
           if (!isCurrent(operation, "")) return;
           summaryCache.current.set(project.id, entry);
           setProjectSummaries((current) => ({ ...current, [project.id]: entry }));
@@ -170,7 +170,7 @@ export function useConsoleState() {
       const projects = list.projects ?? [];
       if (!selectedProjectID) {
         patch(workspacePatch(projects));
-        void loadProjectSummaries(projects, sessionStatus.agent_connected, operation, forceSummaries);
+        void loadProjectSummaries(projects, operation, forceSummaries);
         return;
       }
       const selected = projects.find((item) => item.id === selectedProjectID) ?? null;
@@ -189,7 +189,7 @@ export function useConsoleState() {
       if (!isCurrent(operation, selectedProjectID)) return;
       const records = services.services ?? [];
       const jobs = deployments.deployments ?? [];
-      const foundation = await loadFoundation(client, selected.id, records, sessionStatus.agent_connected);
+      const foundation = await loadFoundation(client, selected.id);
       if (!isCurrent(operation, selectedProjectID)) return;
       const streamPatch = await reconnect(client, selected.id, sessions.sessions ?? [], jobs);
       if (!isCurrent(operation, selectedProjectID)) return;
@@ -315,7 +315,7 @@ export function useConsoleState() {
     updateRoute(destination, replace);
     patch(workspacePatch(state.projects));
     const sessionStatus = currentSession.current;
-    if (sessionStatus) await loadProjectSummaries(state.projects, sessionStatus.agent_connected, operation);
+    if (sessionStatus) await loadProjectSummaries(state.projects, operation);
     else await load("", operation);
   }
 

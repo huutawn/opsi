@@ -1,3 +1,4 @@
+import { useI18n } from "../../lib/i18n/index.ts";
 import React, { ButtonHTMLAttributes, HTMLAttributes, InputHTMLAttributes, ReactNode, Ref, SelectHTMLAttributes, TextareaHTMLAttributes } from "react";
 
 export function Icon({ name, className = "" }: { name: string; className?: string }) {
@@ -127,13 +128,16 @@ export function Textarea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
   );
 }
 
-export function StatusBadge({ label, value, status, className = "" }: { label?: string; value?: string; status?: "ready" | "healthy" | "failed" | "in_progress" | "degraded" | "unknown" | "blocked" | "pending"; className?: string }) {
+export function StatusBadge({ label, value, status, className = "" }: { label?: string; value?: string; status?: "ready" | "healthy" | "failed" | "in_progress" | "degraded" | "unknown" | "blocked" | "pending" | "fresh" | "stale" | "partial" | "unavailable"; className?: string }) {
+  const { t } = useI18n();
   const resolved = status ?? value ?? "unknown";
   let colorClass = "bg-status-unknown/20 text-status-unknown";
-  const displayLabel = label ?? (resolved === "ready" ? "Ready" : resolved === "healthy" ? "Healthy" : resolved === "failed" ? "Failed" : resolved === "in_progress" ? "In Progress" : resolved === "degraded" ? "Degraded" : resolved);
+  const fallbackLabel = resolved === "ready" || resolved === "healthy" ? "Healthy" : resolved === "fresh" ? "Fresh" : resolved === "stale" ? "Stale" : resolved === "partial" ? "Partial" : resolved === "unavailable" ? "Unavailable" : resolved === "failed" ? "Failed" : resolved === "in_progress" ? "In Progress" : resolved === "degraded" ? "Degraded" : resolved;
+  const displayLabel = label ? (t(`status.${label.toLowerCase().replace(/\s+/g, "_")}`, label)) : t(`status.${resolved}`, fallbackLabel);
   switch (resolved) {
     case "ready":
     case "healthy":
+    case "fresh":
       colorClass = "bg-status-ready/20 text-status-ready"; break;
     case "failed":
     case "blocked":
@@ -141,11 +145,22 @@ export function StatusBadge({ label, value, status, className = "" }: { label?: 
     case "in_progress":
       colorClass = "bg-status-progress/20 text-status-progress"; break;
     case "degraded":
+    case "stale":
+    case "partial":
       colorClass = "bg-status-warning/20 text-status-warning"; break;
   }
+  const dotColor = resolved === "ready" || resolved === "healthy" || resolved === "fresh"
+    ? "bg-status-ready"
+    : resolved === "in_progress"
+      ? "bg-status-progress animate-pulse"
+      : resolved === "degraded" || resolved === "stale" || resolved === "partial"
+        ? "bg-status-warning"
+        : resolved === "failed" || resolved === "blocked"
+          ? "bg-status-failed"
+          : "bg-status-unknown";
   return (
     <span className={`status ${resolved} inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${colorClass} ${className}`}>
-      <span className={`statusIcon w-1.5 h-1.5 rounded-full ${resolved === "ready" || resolved === "healthy" ? "bg-status-ready" : resolved === "in_progress" ? "bg-status-progress animate-pulse" : resolved === "degraded" ? "bg-status-warning" : resolved === "failed" || resolved === "blocked" ? "bg-status-failed" : "bg-status-unknown"}`} />
+      <span className={`statusIcon w-1.5 h-1.5 rounded-full ${dotColor}`} />
       <span>{displayLabel}</span>
     </span>
   );

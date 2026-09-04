@@ -414,3 +414,102 @@ func (s *Server) handleValidateDependencyProposal(ctx context.Context, _ *Server
 	}
 	return result, nil
 }
+
+func (s *Server) handleValidateServiceConfigurationProposal(ctx context.Context, _ *Server, args map[string]any) (any, error) {
+	raw, ok := args["proposal"]
+	if !ok {
+		return nil, &DomainError{Code: ErrCodeInvalidArgument, Message: "proposal is required"}
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil, &DomainError{Code: ErrCodeInvalidArgument, Message: "proposal must be a JSON object"}
+	}
+	var proposal ServiceConfigurationProposal
+	if err := json.Unmarshal(encoded, &proposal); err != nil {
+		return nil, &DomainError{Code: ErrCodeInvalidArgument, Message: "proposal is malformed"}
+	}
+	proposal.ProjectID = strings.TrimSpace(proposal.ProjectID)
+	proposal.ApplicationID = strings.TrimSpace(proposal.ApplicationID)
+	proposal.ExpectedStateHash = strings.TrimSpace(proposal.ExpectedStateHash)
+	if proposal.ApplicationID == "" || proposal.ExpectedStateHash == "" {
+		return nil, &DomainError{Code: ErrCodeInvalidArgument, Message: "application_id and expected_state_hash are required"}
+	}
+
+	client, err := s.getCloudClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	projectID, err := s.resolveProjectID(ctx, client, map[string]any{"project_id": proposal.ProjectID})
+	if err != nil {
+		return nil, err
+	}
+	services, err := client.ListServices(ctx, projectID)
+	if err != nil {
+		return nil, mapAPIError(err)
+	}
+	applicationID := ""
+	for _, service := range services {
+		if service.ID == proposal.ApplicationID || service.Name == proposal.ApplicationID {
+			applicationID = service.ID
+			break
+		}
+	}
+	if applicationID == "" {
+		return nil, &DomainError{Code: ErrCodeNotFound, Message: "application not found"}
+	}
+	current, err := client.GetServiceConfiguration(ctx, projectID, applicationID)
+	if err != nil {
+		return nil, mapAPIError(err)
+	}
+	result := ServiceConfigurationProposalValidation{
+		Status:           proposalStatusStale,
+		Action:           proposalActionNone,
+		ApplicationID:    applicationID,
+		CurrentRevision:  current.Revision,
+		CurrentStateHash: current.StateHash,
+	}
+	result.ProposalHash = hashCanonical(struct {
+		ProjectID         string                                `json:"project_id"`
+		ApplicationID     string                                `json:"application_id"`
+		ExpectedRevision  uint64                                `json:"expected_revision"`
+		ExpectedStateHash string                                `json:"expected_state_hash"`
+		Draft             cloudclient.ServiceConfigurationDraft `json:"draft"`
+	}{projectID, applicationID, proposal.ExpectedRevision, proposal.ExpectedStateHash, proposal.Draft})
+	if current.Revision != proposal.ExpectedRevision || current.StateHash != proposal.ExpectedStateHash {
+		result.Issues = []DependencyProposalIssue{{Code: ErrCodeProposalStale, Message: "ServiceConfiguration changed after the proposal was created"}}
+		return result, nil
+	}
+	validation, err := client.ValidateServiceConfiguration(ctx, projectID, applicationID, proposal.Draft)
+	if err != nil {
+		return nil, mapAPIError(err)
+	}
+	if !validation.Valid {
+		result.Status = proposalStatusInvalid
+		for _, issue := range validation.Issues {
+			result.Issues = append(result.Issues, DependencyProposalIssue{Code: issue.Code, Field: issue.Field, Message: issue.Message})
+		}
+		return result, nil
+	}
+	preview, err := client.PreviewServiceConfiguration(ctx, projectID, applicationID, proposal.Draft)
+	if err != nil {
+		return nil, mapAPIError(err)
+	}
+	diff, err := client.DiffServiceConfiguration(ctx, projectID, applicationID, preview.Configuration)
+	if err != nil {
+		return nil, mapAPIError(err)
+	}
+	result.Status = proposalStatusValid
+	result.DraftStateHash = preview.DraftStateHash
+	result.NormalizedDraft = preview.Configuration
+	for _, generated := range preview.GeneratedEnvironment {
+		result.GeneratedEnvironmentNames = append(result.GeneratedEnvironmentNames, generated.Name)
+	}
+	sort.Strings(result.GeneratedEnvironmentNames)
+	for _, change := range diff.Changes {
+		result.SemanticDiff = append(result.SemanticDiff, DependencySemanticChange{Action: change.Action, Kind: change.Kind, Name: change.Name, Before: change.Before, After: change.After})
+	}
+	if len(result.SemanticDiff) == 0 {
+		result.Status = proposalStatusNoChange
+	}
+	return result, nil
+}

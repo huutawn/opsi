@@ -4,10 +4,10 @@ import test from "node:test";
 import { groupedTabs, normalizeRoute, parseRoute, projectDestinations, routeHref } from "./navigation.ts";
 
 test("workspace and project navigation keep one authoritative route model", () => {
-  assert.equal(projectDestinations.length, 3);
+  assert.equal(projectDestinations.length, 4);
   assert.deepEqual(
     projectDestinations.map((item) => item.label),
-    ["Deploy", "Observability", "Security"],
+    ["Deploy", "AI Assistant", "Observability", "Security"],
   );
   assert.deepEqual(normalizeRoute({ view: "overview" }), { projectID: "", view: "projects", tab: "" });
   assert.deepEqual(normalizeRoute({ projectID: "proj-1" }), { projectID: "proj-1", view: "deploy", tab: "" });

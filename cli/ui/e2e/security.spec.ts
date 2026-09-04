@@ -227,9 +227,6 @@ async function mockSecurityAPI(page: Page) {
     if (path.endsWith("/telemetry/summary")) {
       return json(route, { project_id: projectID, source: "agent", payload_policy: "redacted", end_unix: 1785290900, health: "healthy" });
     }
-    if (path.includes("/telemetry/services/")) {
-      return json(route, { project_id: projectID, source: "agent", payload_policy: "redacted", services: [] });
-    }
     if (path.endsWith("/incidents")) return json(route, { source: "agent", payload_policy: "redacted", incidents: [] });
 
     return json(route, {});

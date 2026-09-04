@@ -4,13 +4,14 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/opsi-dev/opsi/cli/internal/cloudclient"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 )
 
 const (
 	ProtocolVersion = "2024-11-05"
 	ServerName      = "opsi-mcp"
-	SurfaceVersion  = "mcp-03"
+	SurfaceVersion  = "mcp-04"
 )
 
 // Standard JSON-RPC 2.0 error codes
@@ -99,10 +100,17 @@ type ServerInfo struct {
 	Version string `json:"version"`
 }
 
+type ToolAnnotations struct {
+	ReadOnlyHint    bool `json:"readOnlyHint"`
+	DestructiveHint bool `json:"destructiveHint"`
+	IdempotentHint  bool `json:"idempotentHint"`
+}
+
 type Tool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	InputSchema ToolInputSchema `json:"inputSchema"`
+	Annotations ToolAnnotations `json:"annotations"`
 }
 
 type ToolInputSchema struct {
@@ -337,8 +345,9 @@ type CallToolParams struct {
 }
 
 type CallToolResult struct {
-	Content []ContentItem `json:"content"`
-	IsError bool          `json:"isError,omitempty"`
+	Content           []ContentItem  `json:"content"`
+	StructuredContent *ErrorResponse `json:"structuredContent,omitempty"`
+	IsError           bool           `json:"isError,omitempty"`
 }
 
 type ContentItem struct {
@@ -369,8 +378,10 @@ type ResourceContent struct {
 }
 
 type ErrorResponse struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	Retryable  bool   `json:"retryable"`
+	NextAction string `json:"next_action,omitempty"`
 }
 
 // Source DTOs
@@ -436,6 +447,38 @@ type ProjectContextResult struct {
 	TopologyRevision     uint64            `json:"topology_revision"`
 	TopologyStateHash    string            `json:"topology_state_hash"`
 	DeploymentSummary    DeploymentSummary `json:"deployment_summary"`
+}
+
+// ProjectReviewContext is a bounded composition of existing canonical MCP
+// facts. It does not introduce a second review authority; an external agent
+// reasons over these facts and must submit proposed changes for validation.
+type ProjectReviewContext struct {
+	Action       string               `json:"action"`
+	Project      ProjectContextResult `json:"project"`
+	Applications any                  `json:"applications"`
+	Topology     any                  `json:"topology"`
+}
+
+type ServiceConfigurationProposal struct {
+	ProjectID         string                                `json:"project_id"`
+	ApplicationID     string                                `json:"application_id"`
+	ExpectedRevision  uint64                                `json:"expected_revision"`
+	ExpectedStateHash string                                `json:"expected_state_hash"`
+	Draft             cloudclient.ServiceConfigurationDraft `json:"draft"`
+}
+
+type ServiceConfigurationProposalValidation struct {
+	Status                    string                                `json:"status"`
+	Action                    string                                `json:"action"`
+	ProposalHash              string                                `json:"proposal_hash"`
+	ApplicationID             string                                `json:"application_id"`
+	CurrentRevision           uint64                                `json:"current_revision"`
+	CurrentStateHash          string                                `json:"current_state_hash"`
+	DraftStateHash            string                                `json:"draft_state_hash,omitempty"`
+	NormalizedDraft           cloudclient.ServiceConfigurationDraft `json:"normalized_draft,omitempty"`
+	GeneratedEnvironmentNames []string                              `json:"generated_environment_names,omitempty"`
+	SemanticDiff              []DependencySemanticChange            `json:"semantic_diff,omitempty"`
+	Issues                    []DependencyProposalIssue             `json:"issues,omitempty"`
 }
 
 type DeploymentSummary struct {

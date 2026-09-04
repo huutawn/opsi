@@ -1,7 +1,15 @@
 package mcp
 
 func AllTools() []Tool {
-	return []Tool{
+	tools := []Tool{
+		{
+			Name:        "project_review_context",
+			Description: "Get one bounded project-review snapshot composed from canonical project, application, topology, deployment, and configuration facts. Read-only; external agents provide reasoning and Opsi returns action NONE.",
+			InputSchema: ToolInputSchema{Type: "object", Properties: map[string]PropertyDoc{
+				"project_id":     {Type: "string", Description: "Optional project ID. Inferred from the active session when unambiguous."},
+				"environment_id": {Type: "string", Description: "Optional environment filter."},
+			}},
+		},
 		{
 			Name:        "deployment_readiness_context",
 			Description: "Get one bounded, fail-closed deployment-readiness snapshot derived from existing source, configuration, BuildRecord, topology, canonical preflight, deployment, and verification facts. It is read-only, returns action NONE, and never acknowledges warnings or initiates work.",
@@ -25,6 +33,13 @@ func AllTools() []Tool {
 			Description: "Read-only validation of an external client dependency proposal against current canonical ADC rules. Always returns action NONE and never persists or realizes a proposal.",
 			InputSchema: ToolInputSchema{Type: "object", Properties: map[string]PropertyDoc{
 				"proposal": dependencyProposalProperty(),
+			}, Required: []string{"proposal"}},
+		},
+		{
+			Name:        "validate_service_configuration_proposal",
+			Description: "Validate and semantically diff a complete ServiceConfiguration proposal, including variables, bindings, dependencies, resources, and public route. Read-only: it never persists or applies the draft and always returns action NONE.",
+			InputSchema: ToolInputSchema{Type: "object", Properties: map[string]PropertyDoc{
+				"proposal": serviceConfigurationProposalProperty(),
 			}, Required: []string{"proposal"}},
 		},
 		{
@@ -461,6 +476,23 @@ func AllTools() []Tool {
 			},
 		},
 	}
+	for i := range tools {
+		tools[i].Annotations = ToolAnnotations{
+			ReadOnlyHint:    true,
+			DestructiveHint: false,
+			IdempotentHint:  true,
+		}
+	}
+	return tools
+}
+
+func AllToolNames() []string {
+	tools := AllTools()
+	names := make([]string, len(tools))
+	for i, t := range tools {
+		names[i] = t.Name
+	}
+	return names
 }
 
 func dependencyProposalProperty() PropertyDoc {
@@ -507,6 +539,30 @@ func dependencyProposalProperty() PropertyDoc {
 		"evidence":   {Type: "array", Description: "Maximum 20 observed facts.", Items: evidence},
 		"confidence": {Type: "string", Enum: []string{"HIGH", "MEDIUM", "LOW"}, Description: "Explainable external-client confidence band."},
 	}, Required: []string{"project_id", "environment_id", "application_id", "provenance", "candidate", "evidence", "confidence"}}
+}
+
+func serviceConfigurationProposalProperty() PropertyDoc {
+	environment := &PropertyDoc{Type: "object", Description: "A non-secret environment variable. Secret-looking names and literal secrets are rejected by Cloud validation.", Properties: map[string]PropertyDoc{
+		"name":  {Type: "string", Description: "Environment variable name."},
+		"value": {Type: "string", Description: "Non-secret value."},
+	}, Required: []string{"name", "value"}}
+	return PropertyDoc{Type: "object", Description: "A stale-safe complete ServiceConfiguration candidate. This tool only validates and computes a semantic diff.", Properties: map[string]PropertyDoc{
+		"project_id":          {Type: "string", Description: "Authorized project ID."},
+		"application_id":      {Type: "string", Description: "Application ID or exact name."},
+		"expected_revision":   {Type: "integer", Description: "Current ServiceConfiguration revision."},
+		"expected_state_hash": {Type: "string", Description: "Current ServiceConfiguration state hash."},
+		"draft": {Type: "object", Description: "Complete canonical ServiceConfiguration draft. Omitted arrays remove their current entries.", Properties: map[string]PropertyDoc{
+			"schema_version": {Type: "string", Description: "Use opsi.service_configuration/v1."},
+			"environment":    {Type: "array", Description: "Non-secret user environment variables.", Items: environment},
+			"public_route": {Type: "object", Description: "Optional shared-host route intent.", Properties: map[string]PropertyDoc{
+				"hostname": {Type: "string", Description: "Canonical managed hostname."},
+				"path":     {Type: "string", Description: "Unique path prefix such as / or /api."},
+			}, Required: []string{"hostname", "path"}},
+			"bindings":          {Type: "array", Description: "Canonical application bindings; use application_get and dependency_analysis_context for field vocabulary.", Items: &PropertyDoc{Type: "object"}},
+			"resource_bindings": {Type: "array", Description: "Canonical managed-resource bindings.", Items: &PropertyDoc{Type: "object"}},
+			"dependencies":      {Type: "array", Description: "Canonical dependency contracts.", Items: &PropertyDoc{Type: "object"}},
+		}},
+	}, Required: []string{"application_id", "expected_revision", "expected_state_hash", "draft"}}
 }
 
 func sourcePatchProposalProperty() PropertyDoc {

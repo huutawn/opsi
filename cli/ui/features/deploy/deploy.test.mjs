@@ -6,6 +6,7 @@ import { LocalClient } from "../../lib/api/local-client.ts";
 
 const view = new URL("./deploy-view.tsx", import.meta.url);
 const review = new URL("./plan-review.tsx", import.meta.url);
+const secretEditor = new URL("./secret-configuration-editor.tsx", import.meta.url);
 const sourceStep = new URL("./source-step.tsx", import.meta.url);
 const hostnameQuota = new URL("./public-hostname-quota.tsx", import.meta.url);
 const client = new URL("../../lib/api/local-client.ts", import.meta.url);
@@ -44,10 +45,10 @@ test("Target reuses canonical bootstrap and resumes analysis when a runtime beco
 });
 
 test("generated secrets remain redacted and workflow calls only Local API", async () => {
-  const [plan, api] = await Promise.all([readFile(review, "utf8"), readFile(client, "utf8")]);
-  assert.match(plan, /Generated and securely stored/);
-  assert.match(plan, /setValue\(""\)/);
-  assert.doesNotMatch(plan, /localStorage|sessionStorage|dangerouslySetInnerHTML/);
+  const [plan, secrets, api] = await Promise.all([readFile(review, "utf8"), readFile(secretEditor, "utf8"), readFile(client, "utf8")]);
+  assert.match(secrets, /Generated and securely stored/);
+  assert.match(secrets, /setValue\(""\)/);
+  assert.doesNotMatch(plan + secrets, /localStorage|sessionStorage|dangerouslySetInnerHTML/);
   for (const action of ["analyze", "approve", "acknowledge", "retry", "cancel"]) assert.match(api, new RegExp(action));
   assert.match(api, /\/api\/local\/projects\/\$\{projectID\}\/deployment-runs/);
   assert.doesNotMatch(api, /\/api\/projects\//);

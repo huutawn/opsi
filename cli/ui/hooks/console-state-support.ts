@@ -63,26 +63,20 @@ export async function loadProject(client: LocalClient, projectID: string) {
   ]);
 }
 
-export async function loadFoundation(client: LocalClient, projectID: string, services: ServiceRecord[], agentStatus: string, run: RequestRunner = directRequest): Promise<FoundationData> {
-  const [placementResult, topologyResult, buildsResult] = await Promise.allSettled([
+export async function loadFoundation(client: LocalClient, projectID: string, run: RequestRunner = directRequest): Promise<FoundationData> {
+  const [placementResult, topologyResult, buildsResult, telemetryResult, incidentResult] = await Promise.allSettled([
     run(() => client.placementFacts(projectID)),
     run(() => client.topology(projectID)),
     run(() => client.buildRecords(projectID)),
+    run(() => client.telemetrySummary(projectID)),
+    run(() => client.incidents(projectID)),
   ]);
-  let telemetry: FoundationData["telemetry"] = [];
-  let incidents: FoundationData["incidents"] = [];
-  let telemetrySource: FoundationData["sources"]["telemetry"] = agentStatus === "ok" ? "available" : "unavailable";
-  let incidentSource: FoundationData["sources"]["incidents"] = agentStatus === "ok" ? "available" : "unavailable";
-  if (agentStatus === "ok") {
-    const [telemetryResults, incidentResult] = await Promise.all([
-      Promise.allSettled(services.map((service) => run(() => client.telemetryService(projectID, service.id)))),
-      run(() => client.incidents(projectID)).then((value) => ({ ok: true as const, value })).catch(() => ({ ok: false as const })),
-    ]);
-    telemetrySource = telemetryResults.some((result) => result.status === "rejected") ? "unavailable" : "available";
-    telemetry = telemetryResults.flatMap((result) => result.status === "fulfilled" ? result.value.services ?? [] : []);
-    if (incidentResult.ok) incidents = incidentResult.value.incidents ?? [];
-    else incidentSource = "unavailable";
-  }
+  const telemetry = telemetryResult.status === "fulfilled" ? telemetryResult.value.services ?? [] : [];
+  const incidents = incidentResult.status === "fulfilled" ? incidentResult.value.incidents ?? [] : [];
+  const telemetrySource: FoundationData["sources"]["telemetry"] = telemetryResult.status === "fulfilled" && telemetryResult.value.coverage?.status !== "unavailable"
+    ? "available"
+    : "unavailable";
+  const incidentSource: FoundationData["sources"]["incidents"] = incidentResult.status === "fulfilled" ? "available" : "unavailable";
   return {
     placement: placementResult.status === "fulfilled" ? placementResult.value : null,
     topology: topologyResult.status === "fulfilled" ? topologyResult.value : null,
@@ -98,14 +92,14 @@ export async function loadFoundation(client: LocalClient, projectID: string, ser
   };
 }
 
-export async function loadProjectSummary(client: LocalClient, project: Project, agentStatus: string, run: RequestRunner = directRequest): Promise<ProjectSummaryEntry> {
+export async function loadProjectSummary(client: LocalClient, project: Project, run: RequestRunner = directRequest): Promise<ProjectSummaryEntry> {
   const [readiness, services, deployments] = await Promise.all([
     run(() => client.readiness(project.id)),
     run(() => client.services(project.id)),
     run(() => client.deployments(project.id)),
   ]);
   const records = services.services ?? [];
-  const foundation = await loadFoundation(client, project.id, records, agentStatus, run);
+  const foundation = await loadFoundation(client, project.id, run);
   const nodeStatuses = foundation.placement?.nodes.map((node) => normalizeStatus(node.status)) ?? [];
   const runtimeStatus = foundation.sources.runtime !== "available"
     ? "unavailable"

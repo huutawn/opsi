@@ -1,5 +1,6 @@
 "use client";
 
+import { LocaleProvider, useI18n } from "@/lib/i18n";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ConsoleRouter } from "@/features/console/console-router";
 import type { ConsoleController } from "@/features/console/types";
@@ -11,7 +12,16 @@ import { currentEnvironment } from "@/lib/presentation/infrastructure/model";
 import { Button, Icon } from "@/components/ui/primitives";
 
 export function AppShell() {
+  return (
+    <LocaleProvider>
+      <AppShellContent />
+    </LocaleProvider>
+  );
+}
+
+function AppShellContent() {
   const console = useConsoleState();
+  const { t } = useI18n();
   const [navigationOpen, setNavigationOpen] = useState(false);
   const menuButton = useRef<HTMLButtonElement>(null);
   const navigation = useRef<HTMLElement>(null);
@@ -56,21 +66,21 @@ export function AppShell() {
   }, [navigationOpen]);
 
   if (!console.session && console.state.status === "loading") {
-    return <AuthGate checking message="Checking local credentials and Cloud session…" onAuthenticated={console.setProjectID} />;
+    return <AuthGate checking message={t("auth.checking_loading", "Checking local credentials and Cloud session…")} onAuthenticated={console.setProjectID} />;
   }
   if (console.session && !console.session.authenticated) {
-    return <AuthGate message={console.state.message || "Sign in with GitHub to continue."} onAuthenticated={console.setProjectID} />;
+    return <AuthGate message={console.state.message || t("auth.sign_in_prompt", "Sign in with GitHub to continue.")} onAuthenticated={console.setProjectID} />;
   }
   if (console.state.status === "permission") {
     return <AuthGate message={console.state.message} onAuthenticated={console.setProjectID} />;
   }
   if (!console.session) {
-    return <AuthGate message={console.state.message || "The local Opsi backend is unavailable."} onAuthenticated={console.setProjectID} />;
+    return <AuthGate message={console.state.message || t("auth.backend_unavailable", "The local Opsi backend is unavailable.")} onAuthenticated={console.setProjectID} />;
   }
 
   const environments = console.state.foundation.placement?.environments ?? [];
   const environment = currentEnvironment(console.state.foundation.placement, console.route.environment ?? "");
-  const environmentName = environment?.name ?? (environments.length > 1 ? "Choose environment" : "Production");
+  const environmentName = environment?.name ?? (environments.length > 1 ? t("nav.choose_environment", "Choose environment") : "Production");
 
   return (
     <div className="min-h-screen bg-background text-on-background font-body-md">
@@ -124,6 +134,7 @@ export function AppShell() {
 }
 
 function MutationDialog({ console }: { console: ConsoleController }) {
+  const { t } = useI18n();
   const dialog = useRef<HTMLDialogElement>(null);
   const credential = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
   const returnFocus = useRef<HTMLElement | null>(null);
@@ -203,7 +214,7 @@ function MutationDialog({ console }: { console: ConsoleController }) {
       <div className="flex items-start justify-between border-b border-outline-variant/20 pb-4">
         <div>
           <span className="font-label-sm text-xs text-on-surface-variant uppercase tracking-wider block mb-1">
-            Mutation Review
+            {t("mutation.review_title", "Mutation Review")}
           </span>
           <h2 id="mutationTitle" className="font-headline-md text-xl text-on-surface">
             {review.operation} {review.targetType}
@@ -221,18 +232,18 @@ function MutationDialog({ console }: { console: ConsoleController }) {
 
       <div className="bg-surface-container rounded-xl p-4 border border-outline-variant/20 grid grid-cols-2 gap-3 text-xs">
         <div>
-          <span className="font-label-sm text-on-surface-variant uppercase block">Project</span>
+          <span className="font-label-sm text-on-surface-variant uppercase block">{t("mutation.project", "Project")}</span>
           <span className="font-body-md text-on-surface font-medium">{review.project}</span>
         </div>
         <div>
-          <span className="font-label-sm text-on-surface-variant uppercase block">Target</span>
+          <span className="font-label-sm text-on-surface-variant uppercase block">{t("mutation.target", "Target")}</span>
           <span className="font-code-md text-on-surface font-medium truncate block">{review.targetType} / {review.targetID}</span>
         </div>
       </div>
 
       <div className="flex flex-col gap-2">
         <span className="font-label-sm text-xs text-on-surface-variant uppercase tracking-wider">
-          Proposed Changes
+          {t("mutation.proposed_changes", "Proposed Changes")}
         </span>
         <div className="bg-surface-container-lowest p-3 rounded-lg border border-outline-variant/20 space-y-1 font-code-md text-xs">
           {review.diff.map((item, idx) => (
@@ -248,7 +259,7 @@ function MutationDialog({ console }: { console: ConsoleController }) {
         <div className="flex items-start gap-2 text-status-warning text-xs font-body-md">
           <Icon name="warning" className="text-[18px] shrink-0 mt-0.5" />
           <div>
-            <strong className="font-semibold block mb-0.5">Operational Risk Notice:</strong>
+            <strong className="font-semibold block mb-0.5">{t("mutation.operational_risk", "Operational Risk Notice:")}</strong>
             <span className="text-on-surface-variant">{review.risk}</span>
           </div>
         </div>
@@ -257,7 +268,7 @@ function MutationDialog({ console }: { console: ConsoleController }) {
       {review.confirmation ? (
         <div className="flex flex-col gap-2">
           <label className="font-label-sm text-xs text-on-surface-variant uppercase tracking-wider block">
-            Type <code className="text-primary font-bold">{review.confirmation}</code> to confirm:
+            {t("mutation.type_to_confirm", { confirmation: review.confirmation }, `Type ${review.confirmation} to confirm:`)}
             <input
               aria-label={`Type ${review.confirmation} to confirm`}
               autoComplete="off"
@@ -274,7 +285,7 @@ function MutationDialog({ console }: { console: ConsoleController }) {
       {review.status === "submitting" ? (
         <div className="flex items-center gap-2 text-sm text-status-progress" role="status">
           <Icon name="sync" className="animate-spin text-[18px]" />
-          <span>Submitting reviewed mutation to Local Edge…</span>
+          <span>{t("mutation.submitting", "Submitting reviewed mutation to Local Edge…")}</span>
         </div>
       ) : null}
 
@@ -296,10 +307,10 @@ function MutationDialog({ console }: { console: ConsoleController }) {
       ) : null}
 
       <details className="text-xs text-on-surface-variant">
-        <summary className="cursor-pointer font-medium hover:text-on-surface select-none">Technical details</summary>
+        <summary className="cursor-pointer font-medium hover:text-on-surface select-none">{t("common.technical_details", "Technical details")}</summary>
         <div className="pt-2 space-y-1 font-code-md">
           <p>
-            <span>Idempotency key</span>: <code>{review.idempotencyKey}</code>
+            <span>{t("mutation.idempotency_key", "Idempotency key")}</span>: <code>{review.idempotencyKey}</code>
           </p>
         </div>
       </details>
@@ -311,7 +322,7 @@ function MutationDialog({ console }: { console: ConsoleController }) {
           type="button"
           variant="secondary"
         >
-          {review.status === "succeeded" ? "Close" : "Cancel"}
+          {review.status === "succeeded" ? t("common.close", "Close") : t("common.cancel", "Cancel")}
         </Button>
         {review.status !== "succeeded" ? (
           <Button
@@ -321,10 +332,10 @@ function MutationDialog({ console }: { console: ConsoleController }) {
             variant={review.operation.includes("destroy") || review.operation.includes("remove") ? "danger" : "primary"}
           >
             {review.status === "failed"
-              ? "Retry same attempt"
+              ? t("mutation.retry_same_attempt", "Retry same attempt")
               : review.status === "submitting"
-                ? "Submitting…"
-                : "Confirm and submit"}
+                ? t("common.loading", "Submitting…")
+                : t("mutation.confirm_and_submit", "Confirm and submit")}
           </Button>
         ) : null}
       </div>
@@ -333,6 +344,7 @@ function MutationDialog({ console }: { console: ConsoleController }) {
 }
 
 function AuthGate({ message, onAuthenticated, checking = false }: { message: string; onAuthenticated: (projectID: string) => Promise<boolean>; checking?: boolean }) {
+  const { t } = useI18n();
   const client = useMemo(() => new LocalClient(), []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -343,12 +355,12 @@ function AuthGate({ message, onAuthenticated, checking = false }: { message: str
   const [callbackReady, setCallbackReady] = useState(false);
 
   useEffect(() => {
-    setError(authErrorMessage(callbackErrorCode()));
+    setError(authErrorMessage(callbackErrorCode(), t));
     const callbackSelection = callbackSelectionID();
     setSelectionID(callbackSelection);
     setLoadingProjects(Boolean(callbackSelection));
     setCallbackReady(true);
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     if (!callbackReady) return;
@@ -373,7 +385,7 @@ function AuthGate({ message, onAuthenticated, checking = false }: { message: str
       })
       .catch((cause) => {
         if (ignore) return;
-        setError((cause as Error).message || "The project selection session has expired. Start a new sign-in.");
+        setError((cause as Error).message || t("auth.session_expired", "The project selection session has expired. Start a new sign-in."));
         setSelectionID("");
       })
       .finally(() => {
@@ -384,7 +396,7 @@ function AuthGate({ message, onAuthenticated, checking = false }: { message: str
     return () => {
       ignore = true;
     };
-  }, [callbackReady, client, selectionID]);
+  }, [callbackReady, client, selectionID, t]);
 
   async function signIn() {
     setBusy(true);
@@ -395,7 +407,7 @@ function AuthGate({ message, onAuthenticated, checking = false }: { message: str
       window.location.assign(next.auth_url);
     } catch (cause) {
       setBusy(false);
-      setError((cause as Error).message || "Opsi sign-in is unavailable.");
+      setError((cause as Error).message || t("auth.sign_in_unavailable", "Opsi sign-in is unavailable."));
     }
   }
 
@@ -407,14 +419,14 @@ function AuthGate({ message, onAuthenticated, checking = false }: { message: str
       const selected = await client.selectProject(selectionID, selectedProject);
       const projectID = selected.session.project_id || selectedProject;
       window.history.replaceState({}, "", `/?project=${encodeURIComponent(projectID)}&view=deploy`);
-      if (!await onAuthenticated(projectID)) throw new Error("The authenticated project could not be loaded. Try signing in again.");
+      if (!await onAuthenticated(projectID)) throw new Error(t("auth.project_load_failed", "The authenticated project could not be loaded. Try signing in again."));
       setSelectionID("");
       setProjects(null);
       setSelectedProject("");
       setBusy(false);
     } catch (cause) {
       setBusy(false);
-      setError((cause as Error).message || "Failed to select project. Please try again.");
+      setError((cause as Error).message || t("auth.select_failed", "Failed to select project. Please try again."));
     }
   }
 
@@ -449,9 +461,9 @@ function AuthGate({ message, onAuthenticated, checking = false }: { message: str
 
             {selectionID && (loadingProjects || projects) ? (
               <>
-                <h1 className="font-headline-md text-2xl text-on-surface mb-2 tracking-tight">Choose a Project</h1>
+                <h1 className="font-headline-md text-2xl text-on-surface mb-2 tracking-tight">{t("auth.choose_project_title", "Choose a Project")}</h1>
                 <p className="font-body-md text-sm text-on-surface-variant mb-6 leading-relaxed max-w-[320px]">
-                  Select a project authorized for your GitHub account.
+                  {t("auth.choose_project_desc", "Select a project authorized for your GitHub account.")}
                 </p>
                 {error ? (
                   <div className="w-full bg-error-container/20 border border-error/30 text-error p-3 rounded-lg text-xs mb-4 text-left" role="alert">
@@ -461,7 +473,7 @@ function AuthGate({ message, onAuthenticated, checking = false }: { message: str
                 {loadingProjects ? (
                   <div className="flex items-center gap-2 text-sm text-on-surface-variant py-4">
                     <Icon name="sync" className="animate-spin text-[18px]" />
-                    <span>Loading accessible projects…</span>
+                    <span>{t("auth.loading_projects", "Loading accessible projects…")}</span>
                   </div>
                 ) : projects && projects.length > 0 ? (
                   <form className="w-full flex flex-col gap-4 text-left" onSubmit={(e) => { e.preventDefault(); void completeSelection(); }}>
@@ -495,7 +507,7 @@ function AuthGate({ message, onAuthenticated, checking = false }: { message: str
                       ))}
                     </div>
                     <Button disabled={busy || !selectedProject} type="submit" variant="primary">
-                      {busy ? "Signing in…" : "Continue with Selected Project"}
+                      {busy ? t("auth.signing_in", "Signing in…") : t("auth.continue_selected_project", "Continue with Selected Project")}
                     </Button>
                     <button
                       className="text-xs text-on-surface-variant hover:text-on-surface underline text-center cursor-pointer"
@@ -503,14 +515,14 @@ function AuthGate({ message, onAuthenticated, checking = false }: { message: str
                       onClick={cancelSelection}
                       type="button"
                     >
-                      Cancel
+                      {t("common.cancel", "Cancel")}
                     </button>
                   </form>
                 ) : (
                   <div className="space-y-4">
-                    <p className="text-sm text-on-surface-variant">No accessible projects found.</p>
+                    <p className="text-sm text-on-surface-variant">{t("auth.no_projects", "No accessible projects found.")}</p>
                     <Button onClick={cancelSelection} type="button" variant="secondary">
-                      Back to sign-in
+                      {t("auth.back_to_sign_in", "Back to sign-in")}
                     </Button>
                   </div>
                 )}
@@ -518,17 +530,17 @@ function AuthGate({ message, onAuthenticated, checking = false }: { message: str
             ) : (
               <>
                 <h1 className="font-headline-md text-2xl text-on-surface mb-2 tracking-tight">
-                  {checking ? "Checking Session" : "Sign in to Opsi"}
+                  {checking ? t("auth.checking_title", "Checking Session") : t("auth.sign_in_title", "Sign in to Opsi")}
                 </h1>
                 <p className="font-body-md text-sm text-on-surface-variant mb-8 leading-relaxed max-w-[320px]">
                   {checking
-                    ? "Verifying local credentials and Cloud session."
-                    : "Deploy and manage your infrastructure with factual state management."}
+                    ? t("auth.checking_desc", "Verifying local credentials and Cloud session.")
+                    : t("auth.sign_in_desc", "Deploy and manage your infrastructure with factual state management.")}
                 </p>
 
                 {error ? (
                   <div className="w-full bg-error-container/20 border border-error/30 text-error p-3 rounded-lg text-xs mb-4 text-left" role="alert">
-                    <strong>Sign-in failed: </strong>{error}
+                    <strong>{t("auth.sign_in_failed_prefix", "Sign-in failed: ")}</strong>{error}
                   </div>
                 ) : null}
 
@@ -552,13 +564,13 @@ function AuthGate({ message, onAuthenticated, checking = false }: { message: str
                         fillRule="evenodd"
                       />
                     </svg>
-                    <span>{busy ? "Opening GitHub…" : "Continue with GitHub"}</span>
+                    <span>{busy ? t("auth.opening_github", "Opening GitHub…") : t("auth.sign_in_github", "Continue with GitHub")}</span>
                   </button>
                 ) : null}
 
                 <div className="mt-6 flex items-center gap-2 text-on-surface-variant/70 font-body-md text-[13px]">
                   <Icon name="info" className="text-[16px]" />
-                  <span>Opsi uses GitHub for identity and repository access.</span>
+                  <span>{t("auth.identity_notice", "Opsi uses GitHub for identity and repository access.")}</span>
                 </div>
               </>
             )}
@@ -566,13 +578,13 @@ function AuthGate({ message, onAuthenticated, checking = false }: { message: str
 
           <div className="bg-surface-container-highest/30 px-8 py-4 flex flex-col items-center border-t border-outline-variant/10">
             <div className="flex gap-4 font-body-md text-[13px] text-on-surface-variant">
-              <span className="hover:text-primary transition-colors">Documentation</span>
+              <span className="hover:text-primary transition-colors">{t("common.documentation", "Documentation")}</span>
               <span className="text-outline-variant">•</span>
-              <span className="hover:text-primary transition-colors">Support</span>
+              <span className="hover:text-primary transition-colors">{t("common.support", "Support")}</span>
               <span className="text-outline-variant">•</span>
               <span className="flex items-center gap-1.5 text-on-surface-variant">
                 <span className="w-2 h-2 rounded-full bg-status-ready inline-block" />
-                Status
+                {t("common.status", "Status")}
               </span>
             </div>
           </div>
@@ -613,18 +625,19 @@ function latestUpdate(console: ConsoleController) {
   );
 }
 
-function authErrorMessage(code: string) {
-  return (
-    ({
-      GITHUB_ACCOUNT_UNLINKED: "This GitHub account is not linked to an Opsi user.",
-      OPSI_MEMBERSHIP_REQUIRED: "No Opsi projects are available for this account.",
-      PROJECT_SELECTION_REQUIRED: "This account needs an explicit project selection.",
-      GITHUB_AUTH_DENIED: "GitHub authorization was cancelled.",
-      AUTH_SESSION_EXPIRED: "The sign-in request expired.",
-      AUTH_UNAVAILABLE: "Opsi sign-in is temporarily unavailable.",
-      GITHUB_AUTH_FAILED: "GitHub sign-in failed.",
-    } as Record<string, string>)[code] ?? ""
-  );
+function authErrorMessage(code: string, t?: (key: string, fb?: string) => string) {
+  const fallback: Record<string, string> = {
+    GITHUB_ACCOUNT_UNLINKED: "This GitHub account is not linked to an Opsi user.",
+    OPSI_MEMBERSHIP_REQUIRED: "No Opsi projects are available for this account.",
+    PROJECT_SELECTION_REQUIRED: "This account needs an explicit project selection.",
+    GITHUB_AUTH_DENIED: "GitHub authorization was cancelled.",
+    AUTH_SESSION_EXPIRED: "The sign-in request expired.",
+    AUTH_UNAVAILABLE: "Opsi sign-in is temporarily unavailable.",
+    GITHUB_AUTH_FAILED: "GitHub sign-in failed.",
+  };
+  if (!code) return "";
+  if (t) return t(`auth.error.${code}`, fallback[code] ?? "");
+  return fallback[code] ?? "";
 }
 
 function focusableElements(root: HTMLElement | null | undefined) {

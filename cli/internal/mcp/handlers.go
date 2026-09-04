@@ -19,29 +19,51 @@ type ToolHandler func(ctx context.Context, s *Server, args map[string]any) (any,
 
 func (s *Server) registerHandlers() map[string]ToolHandler {
 	return map[string]ToolHandler{
-		"deployment_readiness_context":    s.handleDeploymentReadinessContext,
-		"project_context":                 s.handleProjectContext,
-		"topology":                        s.handleTopology,
-		"applications_list":               s.handleApplicationsList,
-		"application_get":                 s.handleApplicationGet,
-		"application_dependencies":        s.handleApplicationDependencies,
-		"managed_resources_list":          s.handleManagedResourcesList,
-		"managed_resource_get":            s.handleManagedResourceGet,
-		"build_records_list":              s.handleBuildRecordsList,
-		"build_record_get":                s.handleBuildRecordGet,
-		"deployments_list":                s.handleDeploymentsList,
-		"deployment_get":                  s.handleDeploymentGet,
-		"deployment_preflight":            s.handleDeploymentPreflight,
-		"source_risk_report":              s.handleSourceRiskReport,
-		"dependency_verification_latest":  s.handleDependencyVerificationLatest,
-		"dependency_verification_history": s.handleDependencyVerificationHistory,
-		"source_files_list":               s.handleSourceFilesList,
-		"source_file_read":                s.handleSourceFileRead,
-		"source_search":                   s.handleSourceSearch,
-		"dependency_analysis_context":     s.handleDependencyAnalysisContext,
-		"validate_dependency_proposal":    s.handleValidateDependencyProposal,
-		"validate_source_patch_proposal":  s.handleValidateSourcePatchProposal,
+		"deployment_readiness_context":            s.handleDeploymentReadinessContext,
+		"project_review_context":                  s.handleProjectReviewContext,
+		"project_context":                         s.handleProjectContext,
+		"topology":                                s.handleTopology,
+		"applications_list":                       s.handleApplicationsList,
+		"application_get":                         s.handleApplicationGet,
+		"application_dependencies":                s.handleApplicationDependencies,
+		"managed_resources_list":                  s.handleManagedResourcesList,
+		"managed_resource_get":                    s.handleManagedResourceGet,
+		"build_records_list":                      s.handleBuildRecordsList,
+		"build_record_get":                        s.handleBuildRecordGet,
+		"deployments_list":                        s.handleDeploymentsList,
+		"deployment_get":                          s.handleDeploymentGet,
+		"deployment_preflight":                    s.handleDeploymentPreflight,
+		"source_risk_report":                      s.handleSourceRiskReport,
+		"dependency_verification_latest":          s.handleDependencyVerificationLatest,
+		"dependency_verification_history":         s.handleDependencyVerificationHistory,
+		"source_files_list":                       s.handleSourceFilesList,
+		"source_file_read":                        s.handleSourceFileRead,
+		"source_search":                           s.handleSourceSearch,
+		"dependency_analysis_context":             s.handleDependencyAnalysisContext,
+		"validate_dependency_proposal":            s.handleValidateDependencyProposal,
+		"validate_service_configuration_proposal": s.handleValidateServiceConfigurationProposal,
+		"validate_source_patch_proposal":          s.handleValidateSourcePatchProposal,
 	}
+}
+
+func (s *Server) handleProjectReviewContext(ctx context.Context, _ *Server, args map[string]any) (any, error) {
+	projectValue, err := s.handleProjectContext(ctx, s, args)
+	if err != nil {
+		return nil, err
+	}
+	project, ok := projectValue.(ProjectContextResult)
+	if !ok {
+		return nil, &DomainError{Code: ErrCodeAuthorityUnavailable, Message: "project facts authority returned an unexpected result"}
+	}
+	applications, err := s.handleApplicationsList(ctx, s, args)
+	if err != nil {
+		return nil, err
+	}
+	topology, err := s.handleTopology(ctx, s, args)
+	if err != nil {
+		return nil, err
+	}
+	return ProjectReviewContext{Action: proposalActionNone, Project: project, Applications: applications, Topology: topology}, nil
 }
 
 // handleDeploymentReadinessContext only aggregates existing authorities. In
@@ -1199,8 +1221,10 @@ func (s *Server) handleSourceSearch(ctx context.Context, _ *Server, args map[str
 }
 
 type DomainError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	Retryable  bool   `json:"retryable,omitempty"`
+	NextAction string `json:"next_action,omitempty"`
 }
 
 func (e *DomainError) Error() string {
@@ -1212,14 +1236,46 @@ func mapAPIError(err error) error {
 	if errors.As(err, &apiErr) {
 		switch apiErr.Status {
 		case 401:
-			return &DomainError{Code: ErrCodeAuthRequired, Message: "Cloud authentication required or PAT invalid"}
+			return &DomainError{
+				Code:       ErrCodeAuthRequired,
+				Message:    "Cloud authentication required or PAT invalid",
+				Retryable:  false,
+				NextAction: "Run 'opsi login' outside MCP to authenticate.",
+			}
 		case 403:
-			return &DomainError{Code: ErrCodeForbidden, Message: "permission denied for requested resource"}
+			return &DomainError{
+				Code:       ErrCodeForbidden,
+				Message:    "permission denied for requested resource",
+				Retryable:  false,
+				NextAction: "Check your user role or project permissions.",
+			}
 		case 404:
-			return &DomainError{Code: ErrCodeNotFound, Message: "requested resource not found"}
+			return &DomainError{
+				Code:       ErrCodeNotFound,
+				Message:    "requested resource not found",
+				Retryable:  false,
+				NextAction: "Verify that the requested resource exists.",
+			}
+		case 429:
+			return &DomainError{
+				Code:       ErrCodeAuthorityUnavailable,
+				Message:    "Cloud request rate limit exceeded",
+				Retryable:  true,
+				NextAction: "Wait a moment before retrying.",
+			}
 		default:
-			return &DomainError{Code: ErrCodeAuthorityUnavailable, Message: apiErr.Message}
+			return &DomainError{
+				Code:       ErrCodeAuthorityUnavailable,
+				Message:    "Cloud authority is currently unavailable",
+				Retryable:  true,
+				NextAction: "Verify network connectivity or check Cloud service status.",
+			}
 		}
 	}
-	return &DomainError{Code: ErrCodeAuthorityUnavailable, Message: err.Error()}
+	return &DomainError{
+		Code:       ErrCodeAuthorityUnavailable,
+		Message:    "Cloud authority is currently unavailable",
+		Retryable:  true,
+		NextAction: "Verify network connectivity or check Cloud service status.",
+	}
 }

@@ -1,3 +1,4 @@
+import { localeToTag, type Locale } from "../../i18n/index.ts";
 import type { AuditEvent, BreakGlassPolicy, ResourceBinding, SupportSummary } from "@/lib/contracts/registry";
 import type { LocalSessionStatus } from "@/lib/api/local-client";
 import type { ConsoleRoute } from "@/features/console/navigation";
@@ -376,7 +377,8 @@ export function formatAuditActionName(action: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-export function deriveAuditRow(event: AuditEvent): AuditRow {
+export function deriveAuditRow(event: AuditEvent, ...args: unknown[]): AuditRow {
+  const locale = (typeof args[0] === "string" ? args[0] : "en") as Locale;
   const { category, label: categoryLabel } = categorizeAuditEvent(event.action, event.resource_type);
   const actor = classifyActor(event.actor_type, event.actor_user_id);
   const outcome = classifyResult(event.result, event.action);
@@ -395,7 +397,7 @@ export function deriveAuditRow(event: AuditEvent): AuditRow {
   return {
     id: event.id,
     timestamp: event.created_at,
-    formattedTime: formatTimestamp(event.created_at),
+    formattedTime: formatTimestamp(event.created_at, locale),
     action: event.action,
     actionLabel: formatAuditActionName(event.action),
     category,
@@ -448,12 +450,12 @@ export function deriveSecuritySummary(
   };
 }
 
-export function formatTimestamp(iso: string): string {
-  if (!iso) return "Unknown";
+export function formatTimestamp(iso: string, locale: Locale = "en"): string {
+  if (!iso) return locale === "vi" ? "Không xác định" : "Unknown";
   const parsed = Date.parse(iso);
   if (Number.isNaN(parsed)) return iso;
   const date = new Date(parsed);
-  return date.toLocaleString(undefined, {
+  return date.toLocaleString(localeToTag(locale), {
     month: "short",
     day: "numeric",
     hour: "2-digit",
