@@ -18,7 +18,10 @@ type bootstrapWorkerStateRequest struct {
 	Status      string `json:"status"`
 	Message     string `json:"message"`
 	FailureCode string `json:"failure_code"`
-	Retryable   bool   `json:"retryable"`
+	Retryable           bool   `json:"retryable"`
+	ObservedAlgorithm   string `json:"observed_algorithm,omitempty"`
+	ObservedPublicKey   string `json:"observed_public_key,omitempty"`
+	ObservedFingerprint string `json:"observed_fingerprint,omitempty"`
 }
 
 const bootstrapLeaseDuration = 90 * time.Second
@@ -121,10 +124,19 @@ func (s *Server) writeBootstrapLease(w http.ResponseWriter, r *http.Request, lea
 	s.Registry.Audit(session.OrgID, session.ProjectID, "", "BOOTSTRAP_LEASE_ACQUIRED", "bootstrap_session", session.ID, "success", map[string]any{"worker_id": session.LeaseOwner, "node_id": session.NodeID, "lease_expires_at": lease.LeaseExpiresAt})
 	bundle := map[string]any{
 		"session_id": session.ID, "project_id": session.ProjectID, "node_id": session.NodeID,
-		"public_host": session.PublicHost, "ssh_port": session.SSHPort, "role": session.Role,
+		"public_host": session.PublicHost, "resolved_ip": session.ResolvedIP, "ssh_port": session.SSHPort, "role": session.Role,
 		"agent_registration_token": reg.Token, "agent_registration_expires": reg.ExpiresAt,
 		"checkpoint": session.Checkpoint,
 		"ssh":        map[string]any{"auth_method": credential.AuthMethod, "username": credential.Username, "private_key": string(credential.PrivateKey), "password": string(credential.Password)},
+	}
+	if session.SSHHostKeyTrustID != "" {
+		if trust, err := s.Registry.GetSSHHostKeyTrust(session.ProjectID, session.SSHHostKeyTrustID); err == nil {
+			bundle["host_key"] = map[string]any{
+				"algorithm":   trust.Algorithm,
+				"public_key":  trust.PublicKey,
+				"fingerprint": trust.Fingerprint,
+			}
+		}
 	}
 	if credential.AuthMethod == "command" {
 		bundle["install"] = s.bootstrapInstall
@@ -344,17 +356,25 @@ func (s *Server) handleBootstrapWorkerFinish(w http.ResponseWriter, r *http.Requ
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.Status != "completed" && req.Status != "succeeded" && req.Status != "failed" && req.Status != "cancelled" {
-		writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "INVALID_BOOTSTRAP_STATUS", Message: "bootstrap finish requires completed, succeeded, failed, or cancelled", RequestID: r.Header.Get("X-Request-ID")})
+	if req.Status != "completed" && req.Status != "succeeded" && req.Status != "failed" && req.Status != "cancelled" && req.Status != "waiting_host_key_confirmation" {
+		writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "INVALID_BOOTSTRAP_STATUS", Message: "bootstrap finish requires completed, succeeded, failed, cancelled, or waiting_host_key_confirmation", RequestID: r.Header.Get("X-Request-ID")})
 		return
 	}
 	workerID, leaseToken := bootstrapLeaseHeaders(r)
-	session, err := s.Registry.FinishBootstrapSessionForLease(req.ProjectID, sessionID, workerID, leaseToken, registry.BootstrapFinishResult{Status: req.Status, FailureCode: req.FailureCode, MessageRedacted: req.Message, Retryable: req.Retryable}, s.clock())
+	session, err := s.Registry.FinishBootstrapSessionForLease(req.ProjectID, sessionID, workerID, leaseToken, registry.BootstrapFinishResult{
+		Status:              req.Status,
+		FailureCode:         req.FailureCode,
+		MessageRedacted:     req.Message,
+		Retryable:           req.Retryable,
+		ObservedAlgorithm:   req.ObservedAlgorithm,
+		ObservedPublicKey:   req.ObservedPublicKey,
+		ObservedFingerprint: req.ObservedFingerprint,
+	}, s.clock())
 	if err != nil {
 		writeRegistryFailure(w, r, err)
 		return
 	}
-	if registryBootstrapTerminal(session.Status) {
+	if registryBootstrapTerminal(session.Status) || session.Status == registry.BootstrapWaitingHostKeyConfirmation {
 		s.credentials.Delete(sessionID)
 		s.registrations.DeleteSession(sessionID)
 	}

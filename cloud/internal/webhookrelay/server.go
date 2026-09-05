@@ -35,6 +35,7 @@ import (
 	restoredomain "github.com/opsi-dev/opsi/cloud/internal/restore"
 	"github.com/opsi-dev/opsi/cloud/internal/sourcereport"
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
+	"github.com/opsi-dev/opsi/cloud/internal/sshprobe"
 	"github.com/opsi-dev/opsi/cloud/internal/verificationstore"
 	backupv1 "github.com/opsi-dev/opsi/contracts/go/backupv1"
 	cutoverv1 "github.com/opsi-dev/opsi/contracts/go/cutoverv1"
@@ -62,6 +63,7 @@ type Server struct {
 	DeploymentRuns          deploymentworkflow.Service
 	PublicHostnames         publichostname.Service
 	Cloudflare              CloudflareProvisioner
+	SSHProbe                *sshprobe.Service
 	RepositoryAnalyzer      repositoryanalysis.Detector
 	SourceReports           sourcereport.Store
 	Verifications           verificationstore.Store
@@ -167,6 +169,7 @@ func NewServer(cfg Config) *Server {
 
 		installationDiscoveryGrants: map[string]installationDiscoveryGrant{},
 		random:                      rand.Reader,
+		SSHProbe:                    &sshprobe.Service{Timeout: 15 * time.Second},
 	}
 	server.Cutovers.Deployments = registryService
 	server.Cutovers.BuildRecords = buildRecordService.Store
@@ -181,6 +184,12 @@ func NewServer(cfg Config) *Server {
 		server.RegistryPullCredentials = NewGHCRRegistryPullCredentialProvider(cfg.BuildRegistry, nil, cfg.RegistryPull)
 	}
 	return server
+}
+func (s *Server) probeService() *sshprobe.Service {
+	if s.SSHProbe != nil {
+		return s.SSHProbe
+	}
+	return &sshprobe.Service{Timeout: 15 * time.Second}
 }
 
 func (s *Server) clock() time.Time {

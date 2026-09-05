@@ -46,6 +46,7 @@ export const vi: Record<TranslationKey, string> = {
   "status.offline": "Ngoại tuyến",
   "status.in_progress": "Đang xử lý",
   "status.unknown": "Không xác định",
+  "status.waiting_host_key_confirmation": "Cần xác nhận Host Key",
   "status.succeeded": "Thành công",
   "status.active": "Đang hoạt động",
   "status.stable": "Ổn định",

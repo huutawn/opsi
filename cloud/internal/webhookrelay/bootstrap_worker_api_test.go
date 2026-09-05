@@ -176,7 +176,7 @@ func TestBootstrapCommandExpiresBeforeClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	project, _ := server.Registry.CreateProject("org-1", "Expired", "expired", "", "project-expired")
-	session, _ := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.81", "root", "command", "", "boot-expired", 0)
+	session, _ := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.81", "root", "command", "", "boot-expired", 0, "")
 	token := session.ID + ".btok-expired"
 	store.Put(session.ID, BootstrapCredential{AuthMethod: "command", Username: "root", Token: []byte(token)}, time.Second)
 	now = now.Add(time.Second)
@@ -203,7 +203,8 @@ func TestBootstrapWorkerLeaseAndLeaseBoundMutations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, err := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-key", 22)
+	probeID := seedRelayTestProbe(t, server, project.ID, "203.0.113.10", 22)
+	session, err := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-key", 22, probeID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +278,8 @@ func TestBootstrapWorkerCheckpointAPIAndLeaseResponse(t *testing.T) {
 	now := time.Now().UTC()
 	server.now = func() time.Time { return now }
 	project, _ := server.Registry.CreateProject("org-1", "Checkpoint", "checkpoint", "", "project-checkpoint")
-	session, _ := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.40", "root", "password", "", "boot-checkpoint", 22)
+	probeID := seedRelayTestProbe(t, server, project.ID, "203.0.113.40", 22)
+	session, _ := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.40", "root", "password", "", "boot-checkpoint", 22, probeID)
 	server.credentials.Put(session.ID, BootstrapCredential{AuthMethod: "password", Username: "root", Password: []byte("ssh-secret")}, time.Hour)
 	server.registrations.Put(session.ID, session.OrgID, session.ProjectID, session.NodeID, "areg-secret", time.Hour)
 	handler := server.Handler()
@@ -377,7 +379,8 @@ func TestBootstrapWorkerCheckpointAPIAndLeaseResponse(t *testing.T) {
 func TestConcurrentBootstrapLeaseRequestsReceiveOneSession(t *testing.T) {
 	server := NewServer(Config{BootstrapWorkerToken: "worker-secret"})
 	project, _ := server.Registry.CreateProject("org-1", "Demo", "demo", "", "project-key")
-	session, _ := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-key", 22)
+	probeID := seedRelayTestProbe(t, server, project.ID, "203.0.113.10", 22)
+	session, _ := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-key", 22, probeID)
 	server.credentials.Put(session.ID, BootstrapCredential{AuthMethod: "password", Username: "root", Password: []byte("secret")}, time.Hour)
 	server.registrations.Put(session.ID, session.OrgID, session.ProjectID, session.NodeID, "areg-secret", time.Hour)
 	handler := server.Handler()
@@ -410,7 +413,8 @@ func TestBootstrapLeaseHeartbeatEndpointExtendsLeaseAndRejectsStaleLease(t *test
 	now := time.Now().UTC()
 	server.now = func() time.Time { return now }
 	project, _ := server.Registry.CreateProject("org-1", "Demo", "demo", "", "project-key")
-	session, _ := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-key", 22)
+	probeID := seedRelayTestProbe(t, server, project.ID, "203.0.113.10", 22)
+	session, _ := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-key", 22, probeID)
 	server.credentials.Put(session.ID, BootstrapCredential{AuthMethod: "password", Username: "root", Password: []byte("ssh-secret")}, time.Hour)
 	server.registrations.Put(session.ID, session.OrgID, session.ProjectID, session.NodeID, "areg-initial", time.Hour)
 	handler := server.Handler()
@@ -467,7 +471,8 @@ func TestBootstrapCredentialAndRegistrationTokenSurviveRetryAttempt(t *testing.T
 	now := time.Now().UTC()
 	server.now = func() time.Time { return now }
 	project, _ := server.Registry.CreateProject("org-1", "Demo", "demo", "", "project-key")
-	session, _ := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-key", 22)
+	probeID := seedRelayTestProbe(t, server, project.ID, "203.0.113.10", 22)
+	session, _ := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-key", 22, probeID)
 	server.credentials.Put(session.ID, BootstrapCredential{AuthMethod: "password", Username: "root", Password: []byte("ssh-secret")}, time.Hour)
 	server.registrations.Put(session.ID, session.OrgID, session.ProjectID, session.NodeID, "areg-initial", time.Hour)
 	handler := server.Handler()
@@ -544,7 +549,8 @@ func TestBootstrapCredentialAndRegistrationTokenSurviveRetryAttempt(t *testing.T
 func TestBootstrapPermanentFailureDeadLetterCleansSecrets(t *testing.T) {
 	server := NewServer(Config{BootstrapWorkerToken: "worker-secret"})
 	project, _ := server.Registry.CreateProject("org-1", "Demo", "demo", "", "project-key")
-	session, _ := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-key", 22)
+	probeID := seedRelayTestProbe(t, server, project.ID, "203.0.113.10", 22)
+	session, _ := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-key", 22, probeID)
 	server.credentials.Put(session.ID, BootstrapCredential{AuthMethod: "password", Username: "root", Password: []byte("ssh-secret")}, time.Hour)
 	server.registrations.Put(session.ID, session.OrgID, session.ProjectID, session.NodeID, "areg-initial", time.Hour)
 	handler := server.Handler()

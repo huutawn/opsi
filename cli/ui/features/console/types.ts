@@ -44,6 +44,7 @@ export type ConsoleController = {
     loadBootstrapEvents: (sessionID: string) => Promise<void>;
     refreshBootstrap: (sessionID: string) => Promise<BootstrapSession | undefined>;
     retryBootstrap: (sessionID: string, onRetried?: () => void | Promise<void>) => void;
+    resumeBootstrap: (sessionID: string, probeID: string, authMethod: string, credential: string, username?: string, onResumed?: () => void | Promise<void>) => Promise<string | undefined>;
     loadDeploymentEvents: (deploymentID: string) => Promise<void>;
     incidentList: (event: FormEvent<HTMLFormElement>) => Promise<void>;
     incidentGet: (event: FormEvent<HTMLFormElement>) => Promise<void>;

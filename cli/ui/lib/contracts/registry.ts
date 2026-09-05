@@ -872,12 +872,42 @@ export type IncidentEvidence = {
   content_sha256: string;
 };
 
+export type SSHHostKeyTrust = {
+  id: string;
+  project_id: string;
+  host: string;
+  port: number;
+  algorithm: string;
+  fingerprint: string;
+  status: "active" | "superseded";
+  created_at: string;
+  superseded_at?: string;
+};
+
+export type SSHHostKeyObservation = {
+  id: string;
+  probe_id: string;
+  project_id: string;
+  public_host: string;
+  ssh_port: number;
+  resolved_ip: string;
+  algorithm: string;
+  fingerprint: string;
+  trust_state: "first_seen" | "matched" | "changed";
+  previous_fingerprint?: string;
+  status: "pending" | "confirmed" | "consumed" | "expired";
+  expires_at: string;
+  created_at: string;
+};
+
 export type BootstrapSession = {
   id: string;
   status: string;
   public_host?: string;
+  resolved_ip?: string;
   role: string;
   auth_method?: string;
+  ssh_host_key_trust_id?: string;
   bootstrap_command?: string;
   attempt_count?: number;
   max_attempts?: number;
@@ -890,7 +920,6 @@ export type BootstrapSession = {
   };
   created_at: string;
 };
-
 export type AuditEvent = {
   id: string;
   actor_user_id?: string;

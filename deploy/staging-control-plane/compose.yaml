@@ -138,8 +138,6 @@ services:
       - ./config/bootstrap-worker.json:/etc/opsi/bootstrap-worker.json:ro,Z
     secrets:
       - bootstrap-worker-token
-      - source: ssh-known-hosts
-        target: ssh_known_hosts
     <<: *service-hardening
     healthcheck:
       test: ["CMD", "opsi-bootstrap-worker", "--check", "--config", "/etc/opsi/bootstrap-worker.json"]
@@ -219,8 +217,6 @@ secrets:
     file: ./secrets/opsi-ghcr-pull-token
   cloudflare-api-token:
     file: ./secrets/cloudflare-api-token
-  ssh-known-hosts:
-    file: ./secrets/ssh_known_hosts
   origin-certificate:
     file: ./secrets/origin-certificate.pem
   origin-private-key:

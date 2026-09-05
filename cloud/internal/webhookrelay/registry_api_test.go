@@ -598,7 +598,8 @@ func TestSupportSummaryAndMetrics(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/bootstrap-sessions", bytes.NewReader([]byte(`{"role":"first_server","public_host":"203.0.113.10","ssh_username":"root","auth_method":"password","ssh_password":"secret-password"}`)))
+	probeID := seedRelayTestProbe(t, server, project.ID, "203.0.113.10", 22)
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/bootstrap-sessions", bytes.NewReader([]byte(`{"role":"first_server","public_host":"203.0.113.10","ssh_username":"root","auth_method":"password","ssh_password":"secret-password","ssh_host_key_probe_id":"`+probeID+`"}`)))
 	req.Header.Set("Idempotency-Key", "support-boot")
 	req.Header.Set("X-Request-ID", "req-support-boot")
 	w = httptest.NewRecorder()
@@ -1173,8 +1174,9 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("k3s token status=%d body=%s", w.Code, w.Body.String())
 	}
+	probeID := seedRelayTestProbe(t, server, projectID, "203.0.113.10", 22)
 	privateKeyMarker := "-----BEGIN OPENSSH " + "PRIVATE KEY-----"
-	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/bootstrap-sessions", bytes.NewReader([]byte(`{"role":"first_server","public_host":"203.0.113.10","ssh_username":"root","auth_method":"private_key","ssh_private_key":"`+privateKeyMarker+`\nsecret\n-----END OPENSSH PRIVATE KEY-----","ssh_password":"unexpected"}`)))
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/bootstrap-sessions", bytes.NewReader([]byte(`{"role":"first_server","public_host":"203.0.113.10","ssh_username":"root","auth_method":"private_key","ssh_private_key":"`+privateKeyMarker+`\nsecret\n-----END OPENSSH PRIVATE KEY-----","ssh_password":"unexpected","ssh_host_key_probe_id":"`+probeID+`"}`)))
 	req.Header.Set("Authorization", "Bearer owner_pat")
 	req.Header.Set("Idempotency-Key", "boot-private-key")
 	req.Header.Set("X-Request-ID", "req-boot-private-key")
@@ -1184,7 +1186,8 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 		t.Fatalf("private key bootstrap status=%d body=%s", w.Code, w.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/bootstrap-sessions", bytes.NewReader([]byte(`{"role":"first_server","public_host":"203.0.113.10","ssh_username":"root","auth_method":"password","ssh_password":"secret"}`)))
+	probeID2 := seedRelayTestProbe(t, server, projectID, "203.0.113.10", 22)
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/bootstrap-sessions", bytes.NewReader([]byte(`{"role":"first_server","public_host":"203.0.113.10","ssh_username":"root","auth_method":"password","ssh_password":"secret","ssh_host_key_probe_id":"`+probeID2+`"}`)))
 	req.Header.Set("Authorization", "Bearer owner_pat")
 	req.Header.Set("Idempotency-Key", "boot-owner")
 	req.Header.Set("X-Request-ID", "req-boot-owner")
@@ -1203,7 +1206,8 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/bootstrap-sessions", bytes.NewReader([]byte(`{"role":"worker","public_host":"203.0.113.11","ssh_username":"root","auth_method":"password","ssh_password":"secret"}`)))
+	probeID3 := seedRelayTestProbe(t, server, projectID, "203.0.113.11", 22)
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/bootstrap-sessions", bytes.NewReader([]byte(`{"role":"worker","public_host":"203.0.113.11","ssh_username":"root","auth_method":"password","ssh_password":"secret","ssh_host_key_probe_id":"`+probeID3+`"}`)))
 	req.Header.Set("Authorization", "Bearer owner_pat")
 	req.Header.Set("Idempotency-Key", "worker-before-server")
 	req.Header.Set("X-Request-ID", "req-worker-before-server")
@@ -1373,7 +1377,8 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 	if bytes.Contains(w.Body.Bytes(), []byte("password=secret")) || bytes.Contains(w.Body.Bytes(), []byte("token=abc")) || !bytes.Contains(w.Body.Bytes(), []byte("agent heartbeat marked node healthy")) {
 		t.Fatalf("bad diagnostics body: %s", w.Body.String())
 	}
-	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/bootstrap-sessions", bytes.NewReader([]byte(`{"role":"worker","public_host":"203.0.113.11","ssh_username":"root","auth_method":"password","ssh_password":"secret"}`)))
+	probeID4 := seedRelayTestProbe(t, server, projectID, "203.0.113.11", 22)
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/bootstrap-sessions", bytes.NewReader([]byte(`{"role":"worker","public_host":"203.0.113.11","ssh_username":"root","auth_method":"password","ssh_password":"secret","ssh_host_key_probe_id":"`+probeID4+`"}`)))
 	req.Header.Set("Authorization", "Bearer owner_pat")
 	req.Header.Set("Idempotency-Key", "worker-after-server")
 	req.Header.Set("X-Request-ID", "req-worker-after-server")
@@ -1552,7 +1557,8 @@ func TestBootstrapManualRetryOwnerAdminIdempotencyAndPreconditions(t *testing.T)
 		{UserID: "developer", OrgID: "org-1", ProjectID: project.ID, Role: "Developer", Hash: developerHash},
 		{UserID: "viewer", OrgID: "org-1", ProjectID: project.ID, Role: "Viewer", Hash: viewerHash},
 	}}}
-	session, err := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-key", 22)
+	probeID := seedRelayTestProbe(t, server, project.ID, "203.0.113.10", 22)
+	session, err := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-key", 22, probeID)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -16,7 +16,6 @@ DEPLOY = ROOT / "deploy" / "dev-control-plane"
 ENV_PATH = DEPLOY / ".env"
 CLOUD_PATH = DEPLOY / "config" / "cloud.json"
 WORKER_PATH = DEPLOY / "config" / "bootstrap-worker.json"
-KNOWN_HOSTS_PATH = DEPLOY / "secrets" / "ssh_known_hosts"
 GITHUB_APP_KEY_PATH = DEPLOY / "secrets" / "github-app-private-key.pem"
 PLACEHOLDER_PREFIXES = ("REPLACE_WITH_",)
 PLACEHOLDER_VALUES = {"CHANGE_ME", "EXAMPLE_SECRET"}
@@ -231,19 +230,6 @@ def validate_permissions(path: pathlib.Path) -> None:
         fail(f"{path.relative_to(ROOT)} must not be readable or writable by group/other (use chmod 0600)")
 
 
-def validate_known_hosts_file(path: pathlib.Path) -> bool:
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        fail(f"missing runtime file: {path.relative_to(ROOT)}")
-    if stat.S_ISLNK(info.st_mode):
-        fail(f"{path.relative_to(ROOT)} must not be a symlink")
-    if not stat.S_ISREG(info.st_mode):
-        fail(f"{path.relative_to(ROOT)} must be a regular file")
-    mode = stat.S_IMODE(info.st_mode)
-    if mode & 0o022:
-        fail(f"{path.relative_to(ROOT)} must not be group/world writable")
-    return info.st_size > 0
 
 
 def validate_github_app_key_file(path: pathlib.Path, enabled: bool) -> None:
@@ -430,12 +416,6 @@ def validate_runtime() -> int:
         agent_artifact_ready = False
     if not agent_artifact_ready:
         warning_reasons.append("Agent artifact URL/checksum are real")
-
-    known_hosts_config = require_string(worker, "ssh_known_hosts_path", "bootstrap-worker")
-    if known_hosts_config != "/etc/opsi/ssh_known_hosts":
-        fail("bootstrap-worker.ssh_known_hosts_path must be /etc/opsi/ssh_known_hosts")
-    if not validate_known_hosts_file(KNOWN_HOSTS_PATH):
-        warning_reasons.append("known_hosts contains the target host key")
 
     if agent_cloud.hostname in {"127.0.0.1", "localhost", "::1", "cloud"}:
         warning_reasons.append("agent_cloud_url is reachable from the target")

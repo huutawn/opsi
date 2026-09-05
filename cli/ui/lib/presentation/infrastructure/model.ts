@@ -57,7 +57,7 @@ export type ServerLifecycle = {
   session?: BootstrapSession;
 };
 
-const activeBootstrapStatuses = new Set(["created", "pending", "waiting", "retry_wait", "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying"]);
+const activeBootstrapStatuses = new Set(["created", "pending", "waiting", "retry_wait", "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying", "waiting_host_key_confirmation"]);
 const connectingBootstrapStatuses = new Set(["created", "pending", "retry_wait", "validating", "connecting"]);
 const failedBootstrapStatuses = new Set(["failed", "dead_letter"]);
 const offlineRuntimeStatuses = new Set(["offline", "failed", "unavailable", "degraded"]);

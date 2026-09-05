@@ -14,6 +14,7 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentworkflow"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
+	"github.com/opsi-dev/opsi/cloud/internal/sshprobe"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 )
@@ -505,10 +506,22 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 			AuthMethod    string `json:"auth_method"`
 			SSHPrivateKey string `json:"ssh_private_key"`
 			SSHPassword   string `json:"ssh_password"`
-			K3SToken      string `json:"k3s_token"`
+			K3SToken          string `json:"k3s_token"`
+			SSHHostKeyProbeID string `json:"ssh_host_key_probe_id"`
 		}
 		if !decodeJSON(w, r, &req) {
 			return
+		}
+		if req.AuthMethod == "command" && req.SSHHostKeyProbeID != "" {
+			writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "BOOTSTRAP_COMMAND_PROBE_PROHIBITED", Message: "bootstrap-command flow does not accept SSH host-key probe", RequestID: r.Header.Get("X-Request-ID")})
+			return
+		}
+		if req.AuthMethod != "command" && req.SSHHostKeyProbeID == "" {
+			writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "SSH_HOST_KEY_PROBE_REQUIRED", Message: "SSH host-key probe is required for SSH bootstrap", RequestID: r.Header.Get("X-Request-ID")})
+			return
+		}
+		if req.AuthMethod != "command" && req.SSHPort <= 0 {
+			req.SSHPort = 22
 		}
 		credential, err := bootstrapCredential(req.AuthMethod, req.SSHUsername, req.SSHPrivateKey, req.SSHPassword, req.K3SToken)
 		if err != nil {
@@ -522,7 +535,7 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 				return
 			}
 		}
-		value, err := s.Registry.CreateBootstrapSession(projectID, req.Role, req.PublicHost, credential.Username, credential.AuthMethod, principal.UserID, r.Header.Get("Idempotency-Key"), req.SSHPort)
+		value, err := s.Registry.CreateBootstrapSession(projectID, req.Role, req.PublicHost, credential.Username, credential.AuthMethod, principal.UserID, r.Header.Get("Idempotency-Key"), req.SSHPort, req.SSHHostKeyProbeID)
 		if err == nil {
 			s.observer.Inc("bootstrap_sessions_total")
 			ttl := time.Until(value.ExpiresAt)
@@ -640,6 +653,194 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 	if len(parts) == 5 && parts[2] == "bootstrap-sessions" && parts[4] == "events" && r.Method == http.MethodGet {
 		value, err := s.Registry.BootstrapEvents(projectID, parts[3])
 		writeRegistryResult(w, r, value, err, http.StatusOK)
+		return
+	}
+	if len(parts) == 5 && parts[2] == "bootstrap-sessions" && parts[4] == "resume" && r.Method == http.MethodPost {
+		if !requireWriteHeaders(w, r) {
+			return
+		}
+		if !s.requireRole(w, r, principal, projectID, "bootstrap_session", parts[3], "owner", "admin", "developer") {
+			return
+		}
+		var req struct {
+			SSHHostKeyProbeID string `json:"ssh_host_key_probe_id"`
+			AuthMethod        string `json:"auth_method"`
+			SSHUsername       string `json:"ssh_username"`
+			SSHPrivateKey     string `json:"ssh_private_key"`
+			SSHPassword       string `json:"ssh_password"`
+			K3SToken          string `json:"k3s_token"`
+		}
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		if req.SSHHostKeyProbeID == "" {
+			writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "SSH_HOST_KEY_PROBE_REQUIRED", Message: "ssh_host_key_probe_id is required", RequestID: r.Header.Get("X-Request-ID")})
+			return
+		}
+		credential, err := bootstrapCredential(req.AuthMethod, req.SSHUsername, req.SSHPrivateKey, req.SSHPassword, req.K3SToken)
+		if err != nil {
+			writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "INVALID_BOOTSTRAP_CREDENTIAL", Message: err.Error(), RequestID: r.Header.Get("X-Request-ID")})
+			return
+		}
+		defer clearBootstrapCredential(&credential)
+		resumed, err := s.Registry.ResumeBootstrapSession(projectID, parts[3], req.SSHHostKeyProbeID, principal.UserID, r.Header.Get("Idempotency-Key"), s.clock())
+		if err != nil {
+			writeRegistryFailure(w, r, err)
+			return
+		}
+		ttl := time.Until(resumed.ExpiresAt)
+		if ttl <= 0 {
+			ttl = 30 * time.Minute
+		}
+		registrationToken := newSecret("areg")
+		s.credentials.Put(resumed.ID, credential, ttl)
+		s.registrations.Put(resumed.ID, resumed.OrgID, projectID, resumed.NodeID, registrationToken, ttl)
+		writeJSON(w, http.StatusOK, resumed)
+		return
+	}
+	if len(parts) == 3 && parts[2] == "ssh-host-key-probes" && r.Method == http.MethodPost {
+		if !requireWriteHeaders(w, r) {
+			return
+		}
+		if !s.requireRole(w, r, principal, projectID, "ssh_host_key_probe", projectID, "owner", "admin", "developer") {
+			return
+		}
+		if !s.limits.Allow("ssh_probe:"+firstNonEmpty(principal.UserID, principal.OrgID, projectID), 20, time.Hour) {
+			writeRegistryError(w, registry.APIError{Status: http.StatusTooManyRequests, Code: "RATE_LIMITED", Message: "SSH host-key probe rate limit exceeded", RequestID: r.Header.Get("X-Request-ID")})
+			return
+		}
+		var req struct {
+			PublicHost string `json:"public_host"`
+			SSHPort    int    `json:"ssh_port"`
+		}
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		if req.PublicHost == "" {
+			writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "INVALID_SSH_HOST", Message: "public_host is required", RequestID: r.Header.Get("X-Request-ID")})
+			return
+		}
+		if req.SSHPort <= 0 {
+			req.SSHPort = 22
+		}
+		probeResult, err := s.probeService().Probe(r.Context(), sshprobe.ProbeTarget{Host: req.PublicHost, Port: req.SSHPort})
+		if err != nil {
+			status := http.StatusBadGateway
+			code := "SSH_HOST_KEY_PROBE_FAILED"
+			if errors.Is(err, sshprobe.ErrNonPublicAddress) {
+				status = http.StatusBadRequest
+				code = "SSH_HOST_KEY_PROBE_NON_PUBLIC"
+			} else if errors.Is(err, sshprobe.ErrUnsupportedAlgorithm) {
+				status = http.StatusBadRequest
+				code = "SSH_HOST_KEY_UNSUPPORTED_ALGORITHM"
+			}
+			writeRegistryError(w, registry.APIError{Status: status, Code: code, Message: err.Error(), RequestID: r.Header.Get("X-Request-ID")})
+			return
+		}
+		obs, err := s.Registry.CreateSSHHostKeyObservation(projectID, req.PublicHost, req.SSHPort, probeResult.ResolvedIP, probeResult.Algorithm, probeResult.PublicKey, probeResult.Fingerprint, principal.UserID, s.clock())
+		if err != nil {
+			writeRegistryFailure(w, r, err)
+			return
+		}
+		resp := map[string]any{
+			"id":                   obs.ID,
+			"probe_id":             obs.ID,
+			"project_id":           obs.ProjectID,
+			"public_host":          obs.Host,
+			"ssh_port":             obs.Port,
+			"resolved_ip":          obs.ResolvedIP,
+			"algorithm":            obs.Algorithm,
+			"fingerprint":          obs.Fingerprint,
+			"trust_state":          obs.TrustState,
+			"previous_fingerprint": obs.PreviousFingerprint,
+			"status":               obs.Status,
+			"expires_at":           obs.ExpiresAt,
+			"created_at":           obs.CreatedAt,
+		}
+		writeJSON(w, http.StatusCreated, resp)
+		return
+	}
+	if len(parts) == 4 && parts[2] == "ssh-host-key-probes" && r.Method == http.MethodGet {
+		if !s.requireRole(w, r, principal, projectID, "ssh_host_key_probe", parts[3], "owner", "admin", "developer", "viewer", "support") {
+			return
+		}
+		obs, err := s.Registry.GetSSHHostKeyObservation(projectID, parts[3])
+		if err != nil {
+			writeRegistryFailure(w, r, err)
+			return
+		}
+		resp := map[string]any{
+			"id":                   obs.ID,
+			"probe_id":             obs.ID,
+			"project_id":           obs.ProjectID,
+			"public_host":          obs.Host,
+			"ssh_port":             obs.Port,
+			"resolved_ip":          obs.ResolvedIP,
+			"algorithm":            obs.Algorithm,
+			"fingerprint":          obs.Fingerprint,
+			"trust_state":          obs.TrustState,
+			"previous_fingerprint": obs.PreviousFingerprint,
+			"status":               obs.Status,
+			"expires_at":           obs.ExpiresAt,
+			"created_at":           obs.CreatedAt,
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	if len(parts) == 5 && parts[2] == "ssh-host-key-probes" && parts[4] == "confirm" && r.Method == http.MethodPost {
+		if !requireWriteHeaders(w, r) {
+			return
+		}
+		if !s.requireRole(w, r, principal, projectID, "ssh_host_key_probe", parts[3], "owner", "admin", "developer") {
+			return
+		}
+		var req struct {
+			Fingerprint string `json:"fingerprint"`
+		}
+		_ = decodeJSON(w, r, &req)
+		trust, err := s.Registry.ConfirmSSHHostKeyRotation(projectID, parts[3], principal.UserID, req.Fingerprint, r.Header.Get("Idempotency-Key"), s.clock())
+		if err != nil {
+			writeRegistryFailure(w, r, err)
+			return
+		}
+		resp := map[string]any{
+			"id":          trust.ID,
+			"trust_id":    trust.ID,
+			"project_id":  trust.ProjectID,
+			"host":        trust.Host,
+			"port":        trust.Port,
+			"algorithm":   trust.Algorithm,
+			"fingerprint": trust.Fingerprint,
+			"status":      trust.Status,
+			"created_at":  trust.CreatedAt,
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	if len(parts) == 3 && parts[2] == "ssh-host-key-trusts" && r.Method == http.MethodGet {
+		if !s.requireRole(w, r, principal, projectID, "ssh_host_key_trust", projectID, "owner", "admin", "developer", "viewer", "support") {
+			return
+		}
+		trusts, err := s.Registry.ListSSHHostKeyTrusts(projectID)
+		if err != nil {
+			writeRegistryFailure(w, r, err)
+			return
+		}
+		sanitized := make([]map[string]any, len(trusts))
+		for i, t := range trusts {
+			sanitized[i] = map[string]any{
+				"id":            t.ID,
+				"project_id":    t.ProjectID,
+				"host":          t.Host,
+				"port":          t.Port,
+				"algorithm":     t.Algorithm,
+				"fingerprint":   t.Fingerprint,
+				"status":        t.Status,
+				"created_at":    t.CreatedAt,
+				"superseded_at": t.SupersededAt,
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"trusts": sanitized})
 		return
 	}
 	if len(parts) == 3 && parts[2] == "services" && r.Method == http.MethodPost {

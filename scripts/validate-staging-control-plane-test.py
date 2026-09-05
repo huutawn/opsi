@@ -188,7 +188,6 @@ class StagingValidatorTests(unittest.TestCase):
                 "origin-certificate": "-----BEGIN CERTIFICATE-----\nsanitized-test\n-----END CERTIFICATE-----\n",
                 "origin-private-key": "-----BEGIN " + validator.PRIVATE_KEY_MARKER + "-----\nsanitized-test\n-----END " + validator.PRIVATE_KEY_MARKER + "-----\n",
                 "github-app-private-key": "-----BEGIN " + validator.PRIVATE_KEY_MARKER + "-----\nsanitized-test\n-----END " + validator.PRIVATE_KEY_MARKER + "-----\n",
-                "ssh-known-hosts": "host.example.test ssh-ed25519 sanitized-test\n",
             }
         )
         return copy.deepcopy(env), copy.deepcopy(cloud), copy.deepcopy(worker), copy.deepcopy(secrets)

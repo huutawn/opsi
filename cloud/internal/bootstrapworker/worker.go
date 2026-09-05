@@ -43,7 +43,6 @@ type Config struct {
 	K3sInstallerSHA256            string                    `json:"k3s_installer_sha256"`
 	AgentInstallURL               string                    `json:"agent_install_url"`
 	AgentInstallSHA256            string                    `json:"agent_install_sha256"`
-	SSHKnownHostsPath             string                    `json:"ssh_known_hosts_path"`
 	Production                    bool                      `json:"production"`
 	Timeout                       time.Duration             `json:"-"`
 	HTTPClient                    *http.Client              `json:"-"`
@@ -81,7 +80,6 @@ type fileConfig struct {
 	K3sInstallerSHA256            string                    `json:"k3s_installer_sha256"`
 	AgentInstallURL               string                    `json:"agent_install_url"`
 	AgentInstallSHA256            string                    `json:"agent_install_sha256"`
-	SSHKnownHostsPath             string                    `json:"ssh_known_hosts_path"`
 	Production                    bool                      `json:"production"`
 	Timeout                       string                    `json:"timeout"`
 	StagingCrashBarrier           StagingCrashBarrierConfig `json:"staging_crash_barrier"`
@@ -92,6 +90,7 @@ type Bundle struct {
 	ProjectID                string                       `json:"project_id"`
 	NodeID                   string                       `json:"node_id"`
 	PublicHost               string                       `json:"public_host"`
+	ResolvedIP               string                       `json:"resolved_ip,omitempty"`
 	SSHPort                  int                          `json:"ssh_port"`
 	Role                     string                       `json:"role"`
 	AgentRegistrationToken   string                       `json:"agent_registration_token"`
@@ -104,6 +103,7 @@ type Bundle struct {
 		PrivateKey string `json:"private_key"`
 		Password   string `json:"password"`
 	} `json:"ssh"`
+	HostKey                  HostKeyConfig                `json:"host_key,omitempty"`
 }
 
 type Lease struct {
@@ -119,9 +119,13 @@ type JobFailure struct {
 }
 
 type FinishResult struct {
-	Status  string
-	Message string
-	Failure *JobFailure
+	Status              string
+	Message             string
+	Failure             *JobFailure
+	FailureCode         string
+	ObservedAlgorithm   string
+	ObservedPublicKey   string
+	ObservedFingerprint string
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -155,7 +159,7 @@ func LoadConfig(path string) (Config, error) {
 		}
 		workerToken = strings.TrimSuffix(strings.TrimSuffix(string(tokenData), "\n"), "\r")
 	}
-	cfg := Config{CloudURL: raw.CloudURL, AgentCloudURL: raw.AgentCloudURL, AllowInsecureInternalCloudURL: raw.AllowInsecureInternalCloudURL, BootstrapWorkerToken: workerToken, WorkerID: strings.TrimSpace(raw.WorkerID), K3sVersion: strings.TrimSpace(raw.K3sVersion), K3sInstallerURL: raw.K3sInstallerURL, K3sInstallerSHA256: raw.K3sInstallerSHA256, AgentInstallURL: raw.AgentInstallURL, AgentInstallSHA256: raw.AgentInstallSHA256, SSHKnownHostsPath: raw.SSHKnownHostsPath, Production: raw.Production, PollInterval: defaultPollInterval, StagingCrashBarrier: raw.StagingCrashBarrier, stagingCrashBarrierConfigured: barrierConfigured}
+	cfg := Config{CloudURL: raw.CloudURL, AgentCloudURL: raw.AgentCloudURL, AllowInsecureInternalCloudURL: raw.AllowInsecureInternalCloudURL, BootstrapWorkerToken: workerToken, WorkerID: strings.TrimSpace(raw.WorkerID), K3sVersion: strings.TrimSpace(raw.K3sVersion), K3sInstallerURL: raw.K3sInstallerURL, K3sInstallerSHA256: raw.K3sInstallerSHA256, AgentInstallURL: raw.AgentInstallURL, AgentInstallSHA256: raw.AgentInstallSHA256, Production: raw.Production, PollInterval: defaultPollInterval, StagingCrashBarrier: raw.StagingCrashBarrier, stagingCrashBarrierConfigured: barrierConfigured}
 	if cfg.AgentCloudURL == "" {
 		cfg.AgentCloudURL = cfg.CloudURL
 	}
@@ -268,14 +272,7 @@ func (c Config) Validate() error {
 	if c.PollInterval < minPollInterval || c.PollInterval > maxPollInterval {
 		return fmt.Errorf("poll_interval must be between %s and %s", minPollInterval, maxPollInterval)
 	}
-	if c.Production && strings.TrimSpace(c.SSHKnownHostsPath) == "" {
-		return errors.New("production requires ssh_known_hosts_path")
-	}
-	if c.SSHKnownHostsPath != "" {
-		if err := validateKnownHostsFile(c.SSHKnownHostsPath, c.Production); err != nil {
-			return fmt.Errorf("ssh_known_hosts_path: %w", err)
-		}
-	}
+	// Production no longer uses global ssh_known_hosts_path; host keys are pinned per project.
 	if err := validateK3sVersion(c.K3sVersion); err != nil {
 		return fmt.Errorf("k3s_version: %w", err)
 	}
@@ -400,7 +397,7 @@ func NewWorker(cfg Config) Worker {
 	}
 	executor := cfg.Executor
 	if executor == nil {
-		executor = SSHExecutor{KnownHostsPath: cfg.SSHKnownHostsPath}
+		executor = SSHExecutor{}
 	}
 	logger := cfg.Logger
 	if logger == nil {
@@ -534,7 +531,15 @@ func (w Worker) processLease(parent context.Context, lease Lease) error {
 	}
 
 	if checkpoint.NextStepIndex < len(plan.Steps) {
-		target := RemoteTarget{Host: bundle.PublicHost, Port: bundle.SSHPort, Username: bundle.SSH.Username, Password: bundle.SSH.Password, PrivateKey: bundle.SSH.PrivateKey}
+		target := RemoteTarget{
+			Host:       bundle.PublicHost,
+			ResolvedIP: bundle.ResolvedIP,
+			Port:       bundle.SSHPort,
+			Username:   bundle.SSH.Username,
+			Password:   bundle.SSH.Password,
+			PrivateKey: bundle.SSH.PrivateKey,
+			HostKey:    bundle.HostKey,
+		}
 		message := "connecting to target over SSH"
 		if bundle.SSH.AuthMethod == "command" {
 			message = "bootstrap command connected from target"
@@ -554,6 +559,17 @@ func (w Worker) processLease(parent context.Context, lease Lease) error {
 			}
 			if cause := context.Cause(ctx); cause != nil && cause != context.DeadlineExceeded {
 				return cause
+			}
+			var mismatch ErrHostKeyMismatch
+			if errors.As(err, &mismatch) {
+				return w.finishLease(ctx, lease, FinishResult{
+					Status:              "waiting_host_key_confirmation",
+					FailureCode:         "SSH_HOST_KEY_MISMATCH",
+					Message:             "SSH host-key verification failed: key differs from pinned identity",
+					ObservedAlgorithm:   mismatch.Algorithm,
+					ObservedPublicKey:   mismatch.PublicKey,
+					ObservedFingerprint: mismatch.Fingerprint,
+				})
 			}
 			failure := classifyConnectFailure(err)
 			failure.Message = redactForLease(cfg, lease, failure.Message)

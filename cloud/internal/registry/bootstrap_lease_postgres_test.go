@@ -40,7 +40,8 @@ func TestPostgresBootstrapLeaseIsAtomicAcrossWorkers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, err := service.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", userID, "boot-key", 22)
+	probeID := seedTestProbe(t, service, project.ID, "203.0.113.10", 22)
+	session, err := service.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", userID, "boot-key", 22, probeID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +110,8 @@ func TestPostgresBootstrapLeaseHeartbeatRetryDeadLetterSurvivesRestart(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, err := repoA.CreateBootstrapSession(project.ID, "first_server", "203.0.113.20", "root", "password", userID, "boot-key", 22)
+	probeID := seedTestProbe(t, repoA, project.ID, "203.0.113.20", 22)
+	session, err := repoA.CreateBootstrapSession(project.ID, "first_server", "203.0.113.20", "root", "password", userID, "boot-key", 22, probeID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +145,8 @@ func TestPostgresBootstrapLeaseHeartbeatRetryDeadLetterSurvivesRestart(t *testin
 		t.Fatalf("persisted=%+v err=%v", persisted, err)
 	}
 
-	deadSession, err := repoC.CreateBootstrapSession(project.ID, "first_server", "203.0.113.21", "root", "password", userID, "dead-key", 22)
+	probeIDDead := seedTestProbe(t, repoC, project.ID, "203.0.113.21", 22)
+	deadSession, err := repoC.CreateBootstrapSession(project.ID, "first_server", "203.0.113.21", "root", "password", userID, "dead-key", 22, probeIDDead)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +196,8 @@ func TestPostgresBootstrapConcurrentRecoveryIsAtomic(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	repo := PostgresService{DB: db, Now: func() time.Time { return now }}
 	project, _ := repo.CreateProject(orgID, "Bootstrap Recover", "bootstrap-recover-"+suffix, userID, "project-key")
-	session, _ := repo.CreateBootstrapSession(project.ID, "first_server", "203.0.113.30", "root", "password", userID, "boot-key", 22)
+	probeID := seedTestProbe(t, repo, project.ID, "203.0.113.30", 22)
+	session, _ := repo.CreateBootstrapSession(project.ID, "first_server", "203.0.113.30", "root", "password", userID, "boot-key", 22, probeID)
 	lease, ok, err := repo.LeaseNextBootstrapSession("worker-a", "", now, time.Second)
 	if err != nil || !ok {
 		t.Fatalf("lease ok=%v err=%v", ok, err)
@@ -346,7 +350,8 @@ func newPostgresBootstrapCheckpointFixture(t *testing.T) (*sql.DB, PostgresServi
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, err := repo.CreateBootstrapSession(project.ID, "first_server", "203.0.113.40", "root", "password", userID, "boot-key", 22)
+	probeID := seedTestProbe(t, repo, project.ID, "203.0.113.40", 22)
+	session, err := repo.CreateBootstrapSession(project.ID, "first_server", "203.0.113.40", "root", "password", userID, "boot-key", 22, probeID)
 	if err != nil {
 		t.Fatal(err)
 	}

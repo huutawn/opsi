@@ -29,7 +29,7 @@ const deploymentSelectSQL = `SELECT id, org_id, project_id, environment_id, runt
 
 const nodeLifecycleSelectSQL = `SELECT id, org_id, project_id, runtime_id, action, status, target_node_id, target_node_name, node_id, COALESCE(agent_id,''), COALESCE(requested_by,''), COALESCE(idempotency_key,''), confirm_remove, COALESCE(lease_token,''), lease_expires_at, COALESCE(attempt_count,0), COALESCE(max_attempts,3), COALESCE(failure_code,''), COALESCE(failure_message_redacted,''), verified, finished_at, created_at, updated_at FROM node_lifecycle_jobs`
 
-const bootstrapSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, COALESCE(node_id,''), COALESCE(created_by,''), role, status, idempotency_key, COALESCE(public_host,''), COALESCE(ssh_port,0), COALESCE(ssh_username,''), COALESCE(auth_method,''), expires_at, started_at, finished_at, COALESCE(lease_owner,''), COALESCE(lease_token_hash,''), lease_expires_at, leased_at, COALESCE(attempt_count,0), COALESCE(max_attempts,3), next_attempt_at, lease_heartbeat_at, COALESCE(last_failure_code,''), COALESCE(last_failure_message_redacted,''), dead_lettered_at, checkpoint_schema_version, checkpoint_plan_version, checkpoint_plan_fingerprint, checkpoint_next_step_index, checkpoint_last_completed_step, checkpoint_updated_at, created_at, updated_at FROM bootstrap_sessions`
+const bootstrapSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, COALESCE(node_id,''), COALESCE(created_by,''), role, status, idempotency_key, COALESCE(public_host,''), COALESCE(ssh_port,0), COALESCE(ssh_username,''), COALESCE(auth_method,''), expires_at, started_at, finished_at, COALESCE(lease_owner,''), COALESCE(lease_token_hash,''), lease_expires_at, leased_at, COALESCE(attempt_count,0), COALESCE(max_attempts,3), next_attempt_at, lease_heartbeat_at, COALESCE(last_failure_code,''), COALESCE(last_failure_message_redacted,''), dead_lettered_at, checkpoint_schema_version, checkpoint_plan_version, checkpoint_plan_fingerprint, checkpoint_next_step_index, checkpoint_last_completed_step, checkpoint_updated_at, COALESCE(ssh_host_key_trust_id,''), COALESCE(resolved_ip,''), created_at, updated_at FROM bootstrap_sessions`
 
 func (s PostgresService) CreateProject(orgID, name, slug, createdBy, key string) (Project, error) {
 	ctx := context.Background()
@@ -781,7 +781,7 @@ func (s PostgresService) CompleteNodeLifecycle(projectID, nodeID, jobID, request
 	return job, nil
 }
 
-func (s PostgresService) CreateBootstrapSession(projectID, role, publicHost, username, authMethod, createdBy, key string, sshPort int) (BootstrapSession, error) {
+func (s PostgresService) CreateBootstrapSession(projectID, role, publicHost, username, authMethod, createdBy, key string, sshPort int, probeID string) (BootstrapSession, error) {
 	ctx := context.Background()
 	scope := "bootstrap:" + projectID
 	if id, ok, err := s.idempotentResource(ctx, scope, key); err != nil || ok {
@@ -806,9 +806,125 @@ func (s PostgresService) CreateBootstrapSession(projectID, role, publicHost, use
 	if err := s.validateBootstrap(ctx, projectID, role, publicHost); err != nil {
 		return BootstrapSession{}, err
 	}
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return BootstrapSession{}, err
+	}
+	defer tx.Rollback()
+
+	normHost := normalizeHost(publicHost)
+	var trustID string
+	var resolvedIP string
+
+	if authMethod != "command" && sshPort <= 0 {
+		sshPort = 22
+	}
+	if authMethod != "command" {
+		if probeID == "" {
+			return BootstrapSession{}, APIError{Status: 400, Code: "SSH_HOST_KEY_PROBE_REQUIRED", Message: "SSH host-key probe is required for SSH bootstrap"}
+		}
+		obs, err := scanSSHHostKeyObservation(tx.QueryRowContext(ctx, sshHostKeyObservationSelectSQL+` WHERE project_id = $1 AND id = $2 FOR UPDATE`, projectID, probeID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return BootstrapSession{}, APIError{Status: 400, Code: "SSH_HOST_KEY_PROBE_NOT_FOUND", Message: "SSH host-key probe was not found"}
+		}
+		if err != nil {
+			return BootstrapSession{}, err
+		}
+		if !now.Before(obs.ExpiresAt) {
+			return BootstrapSession{}, APIError{Status: 410, Code: "SSH_HOST_KEY_PROBE_EXPIRED", Message: "SSH host-key probe has expired"}
+		}
+		if obs.Host != normHost || obs.Port != sshPort {
+			return BootstrapSession{}, APIError{Status: 400, Code: "SSH_HOST_KEY_ENDPOINT_MISMATCH", Message: "probe endpoint does not match bootstrap session"}
+		}
+		resolvedIP = obs.ResolvedIP
+
+		switch obs.TrustState {
+		case TrustStateFirstSeen:
+			newTrust := SSHHostKeyTrust{
+				ID:          newID("trust"),
+				ProjectID:   projectID,
+				Host:        obs.Host,
+				Port:        obs.Port,
+				Algorithm:   obs.Algorithm,
+				PublicKey:   obs.PublicKey,
+				Fingerprint: obs.Fingerprint,
+				Status:      TrustStatusActive,
+				CreatedBy:   createdBy,
+				CreatedAt:   now,
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO ssh_host_key_trusts(id, project_id, host, port, algorithm, public_key, fingerprint, status, created_by, created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''),$10)`,
+				newTrust.ID, newTrust.ProjectID, newTrust.Host, newTrust.Port, newTrust.Algorithm, newTrust.PublicKey, newTrust.Fingerprint, newTrust.Status, newTrust.CreatedBy, newTrust.CreatedAt,
+			); err != nil {
+				return BootstrapSession{}, err
+			}
+			trustID = newTrust.ID
+			if _, err := tx.ExecContext(ctx, `UPDATE ssh_host_key_observations SET status = 'consumed', updated_at = $1 WHERE id = $2`, now, probeID); err != nil {
+				return BootstrapSession{}, err
+			}
+
+			meta, _ := json.Marshal(map[string]any{
+				"host":        obs.Host,
+				"port":        obs.Port,
+				"fingerprint": obs.Fingerprint,
+				"probe_id":    probeID,
+			})
+			if _, err := tx.ExecContext(ctx, `INSERT INTO audit_events(id, org_id, project_id, actor_type, actor_id, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,$3,'user',NULLIF($4,''),'SSH_HOST_KEY_AUTO_TRUSTED','ssh_host_key_trust',$5,'success',$6,$7)`,
+				newID("aud"), project.OrgID, projectID, createdBy, newTrust.ID, meta, now,
+			); err != nil {
+				return BootstrapSession{}, err
+			}
+		case TrustStateMatched:
+			var activeTrust SSHHostKeyTrust
+			if err := tx.QueryRowContext(ctx, sshHostKeyTrustSelectSQL+` WHERE project_id = $1 AND host = $2 AND port = $3 AND status = 'active'`, projectID, obs.Host, obs.Port).Scan(
+				&activeTrust.ID, &activeTrust.ProjectID, &activeTrust.Host, &activeTrust.Port, &activeTrust.Algorithm,
+				&activeTrust.PublicKey, &activeTrust.Fingerprint, &activeTrust.Status, &activeTrust.CreatedBy,
+				&activeTrust.CreatedAt, &activeTrust.SupersededAt, &activeTrust.SupersededBy,
+			); err != nil || activeTrust.Fingerprint != obs.Fingerprint {
+				return BootstrapSession{}, APIError{Status: 409, Code: "SSH_HOST_KEY_ACTIVE_TRUST_MISMATCH", Message: "active host-key trust does not match observation"}
+			}
+			trustID = activeTrust.ID
+			if _, err := tx.ExecContext(ctx, `UPDATE ssh_host_key_observations SET status = 'consumed', updated_at = $1 WHERE id = $2`, now, probeID); err != nil {
+				return BootstrapSession{}, err
+			}
+
+			meta, _ := json.Marshal(map[string]any{
+				"host":        obs.Host,
+				"port":        obs.Port,
+				"fingerprint": obs.Fingerprint,
+				"probe_id":    probeID,
+			})
+			if _, err := tx.ExecContext(ctx, `INSERT INTO audit_events(id, org_id, project_id, actor_type, actor_id, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,$3,'user',NULLIF($4,''),'SSH_HOST_KEY_MATCHED','ssh_host_key_trust',$5,'success',$6,$7)`,
+				newID("aud"), project.OrgID, projectID, createdBy, activeTrust.ID, meta, now,
+			); err != nil {
+				return BootstrapSession{}, err
+			}
+		case TrustStateChanged:
+			if obs.Status != ObservationStatusConfirmed {
+				return BootstrapSession{}, APIError{Status: 409, Code: "SSH_HOST_KEY_CONFIRMATION_REQUIRED", Message: "SSH host-key has changed; confirmation is required before bootstrapping"}
+			}
+			var activeTrust SSHHostKeyTrust
+			if err := tx.QueryRowContext(ctx, sshHostKeyTrustSelectSQL+` WHERE project_id = $1 AND host = $2 AND port = $3 AND status = 'active'`, projectID, obs.Host, obs.Port).Scan(
+				&activeTrust.ID, &activeTrust.ProjectID, &activeTrust.Host, &activeTrust.Port, &activeTrust.Algorithm,
+				&activeTrust.PublicKey, &activeTrust.Fingerprint, &activeTrust.Status, &activeTrust.CreatedBy,
+				&activeTrust.CreatedAt, &activeTrust.SupersededAt, &activeTrust.SupersededBy,
+			); err != nil || activeTrust.Fingerprint != obs.Fingerprint {
+				return BootstrapSession{}, APIError{Status: 409, Code: "SSH_HOST_KEY_ACTIVE_TRUST_MISMATCH", Message: "confirmed active host-key trust does not match observation"}
+			}
+			trustID = activeTrust.ID
+			if _, err := tx.ExecContext(ctx, `UPDATE ssh_host_key_observations SET status = 'consumed', updated_at = $1 WHERE id = $2`, now, probeID); err != nil {
+				return BootstrapSession{}, err
+			}
+		}
+	} else {
+		if probeID != "" {
+			return BootstrapSession{}, APIError{Status: 400, Code: "BOOTSTRAP_COMMAND_PROBE_PROHIBITED", Message: "bootstrap-command flow does not accept SSH host-key probe"}
+		}
+	}
+
 	node := Node{ID: newID("node"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: publicHost, Role: roleForNode(role), Status: NodePending, PublicHost: publicHost, K3SRole: k3sRoleForBootstrap(role), CreatedAt: now, UpdatedAt: now}
 	var nameTaken bool
-	if err := s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM nodes WHERE runtime_id = $1 AND name = $2)`, runtime.ID, node.Name).Scan(&nameTaken); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM nodes WHERE runtime_id = $1 AND name = $2)`, runtime.ID, node.Name).Scan(&nameTaken); err != nil {
 		return BootstrapSession{}, err
 	}
 	if nameTaken {
@@ -818,16 +934,32 @@ func (s PostgresService) CreateBootstrapSession(projectID, role, publicHost, use
 	if authMethod == "command" {
 		status, step, message = BootstrapWaiting, BootstrapWaiting, "waiting for bootstrap command connection"
 	}
-	session := BootstrapSession{ID: newID("boot"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, NodeID: node.ID, CreatedBy: createdBy, Role: role, Status: status, IdempotencyKey: key, PublicHost: publicHost, SSHPort: sshPort, SSHUsername: username, AuthMethod: authMethod, ExpiresAt: now.Add(30 * time.Minute), MaxAttempts: defaultBootstrapMaxAttempts, CreatedAt: now, UpdatedAt: now}
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return BootstrapSession{}, err
+	session := BootstrapSession{
+		ID:                newID("boot"),
+		OrgID:             project.OrgID,
+		ProjectID:         project.ID,
+		EnvironmentID:     env.ID,
+		RuntimeID:         runtime.ID,
+		NodeID:            node.ID,
+		CreatedBy:         createdBy,
+		Role:              role,
+		Status:            status,
+		IdempotencyKey:    key,
+		PublicHost:        publicHost,
+		ResolvedIP:        resolvedIP,
+		SSHPort:           sshPort,
+		SSHUsername:       username,
+		AuthMethod:        authMethod,
+		SSHHostKeyTrustID: trustID,
+		ExpiresAt:         now.Add(30 * time.Minute),
+		MaxAttempts:       defaultBootstrapMaxAttempts,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
-	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO nodes(id, org_id, project_id, environment_id, runtime_id, name, role, status, public_host, k3s_role, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, node.ID, node.OrgID, node.ProjectID, node.EnvironmentID, node.RuntimeID, node.Name, node.Role, node.Status, node.PublicHost, node.K3SRole, node.CreatedAt, node.UpdatedAt); err != nil {
 		return BootstrapSession{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO bootstrap_sessions(id, org_id, project_id, environment_id, runtime_id, node_id, created_by, role, status, idempotency_key, public_host, ssh_port, ssh_username, auth_method, expires_at, checkpoint_schema_version, checkpoint_plan_version, checkpoint_plan_fingerprint, checkpoint_next_step_index, checkpoint_last_completed_step, checkpoint_updated_at, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''),$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`, session.ID, session.OrgID, session.ProjectID, session.EnvironmentID, session.RuntimeID, session.NodeID, session.CreatedBy, session.Role, session.Status, session.IdempotencyKey, session.PublicHost, session.SSHPort, session.SSHUsername, session.AuthMethod, session.ExpiresAt, session.Checkpoint.SchemaVersion, session.Checkpoint.PlanVersion, session.Checkpoint.PlanFingerprint, session.Checkpoint.NextStepIndex, session.Checkpoint.LastCompletedStep, session.Checkpoint.UpdatedAt, session.CreatedAt, session.UpdatedAt); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO bootstrap_sessions(id, org_id, project_id, environment_id, runtime_id, node_id, created_by, role, status, idempotency_key, public_host, ssh_port, ssh_username, auth_method, expires_at, checkpoint_schema_version, checkpoint_plan_version, checkpoint_plan_fingerprint, checkpoint_next_step_index, checkpoint_last_completed_step, checkpoint_updated_at, ssh_host_key_trust_id, resolved_ip, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''),$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,NULLIF($22,''),$23,$24,$25)`, session.ID, session.OrgID, session.ProjectID, session.EnvironmentID, session.RuntimeID, session.NodeID, session.CreatedBy, session.Role, session.Status, session.IdempotencyKey, session.PublicHost, session.SSHPort, session.SSHUsername, session.AuthMethod, session.ExpiresAt, session.Checkpoint.SchemaVersion, session.Checkpoint.PlanVersion, session.Checkpoint.PlanFingerprint, session.Checkpoint.NextStepIndex, session.Checkpoint.LastCompletedStep, session.Checkpoint.UpdatedAt, session.SSHHostKeyTrustID, session.ResolvedIP, session.CreatedAt, session.UpdatedAt); err != nil {
 		return BootstrapSession{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO bootstrap_events(id, org_id, project_id, session_id, node_id, level, step, message_redacted, progress_percent, created_at) VALUES($1,$2,$3,$4,$5,'info',$6,$7,0,$8)`, newID("evt"), session.OrgID, session.ProjectID, session.ID, session.NodeID, step, message, now); err != nil {
@@ -844,6 +976,7 @@ func (s PostgresService) CreateBootstrapSession(projectID, role, publicHost, use
 	}
 	return session, tx.Commit()
 }
+
 
 func (s PostgresService) UpdateBootstrapSession(projectID, sessionID, status, message string) (BootstrapSession, error) {
 	if !validBootstrapStatus(status) {
@@ -1946,7 +2079,7 @@ type rowScanner interface {
 func scanBootstrapSession(row rowScanner) (BootstrapSession, error) {
 	var b BootstrapSession
 	var started, finished, leaseExpiresAt, leasedAt, nextAttemptAt, leaseHeartbeatAt, deadLetteredAt, checkpointUpdatedAt sql.NullTime
-	err := row.Scan(&b.ID, &b.OrgID, &b.ProjectID, &b.EnvironmentID, &b.RuntimeID, &b.NodeID, &b.CreatedBy, &b.Role, &b.Status, &b.IdempotencyKey, &b.PublicHost, &b.SSHPort, &b.SSHUsername, &b.AuthMethod, &b.ExpiresAt, &started, &finished, &b.LeaseOwner, &b.LeaseTokenHash, &leaseExpiresAt, &leasedAt, &b.AttemptCount, &b.MaxAttempts, &nextAttemptAt, &leaseHeartbeatAt, &b.LastFailureCode, &b.LastFailureRedacted, &deadLetteredAt, &b.Checkpoint.SchemaVersion, &b.Checkpoint.PlanVersion, &b.Checkpoint.PlanFingerprint, &b.Checkpoint.NextStepIndex, &b.Checkpoint.LastCompletedStep, &checkpointUpdatedAt, &b.CreatedAt, &b.UpdatedAt)
+	err := row.Scan(&b.ID, &b.OrgID, &b.ProjectID, &b.EnvironmentID, &b.RuntimeID, &b.NodeID, &b.CreatedBy, &b.Role, &b.Status, &b.IdempotencyKey, &b.PublicHost, &b.SSHPort, &b.SSHUsername, &b.AuthMethod, &b.ExpiresAt, &started, &finished, &b.LeaseOwner, &b.LeaseTokenHash, &leaseExpiresAt, &leasedAt, &b.AttemptCount, &b.MaxAttempts, &nextAttemptAt, &leaseHeartbeatAt, &b.LastFailureCode, &b.LastFailureRedacted, &deadLetteredAt, &b.Checkpoint.SchemaVersion, &b.Checkpoint.PlanVersion, &b.Checkpoint.PlanFingerprint, &b.Checkpoint.NextStepIndex, &b.Checkpoint.LastCompletedStep, &checkpointUpdatedAt, &b.SSHHostKeyTrustID, &b.ResolvedIP, &b.CreatedAt, &b.UpdatedAt)
 	b.StartedAt = nullTimePtr(started)
 	b.FinishedAt = nullTimePtr(finished)
 	b.LeaseExpiresAt = nullTimePtr(leaseExpiresAt)

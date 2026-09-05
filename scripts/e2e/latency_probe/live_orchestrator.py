@@ -8,14 +8,14 @@ import time
 from datetime import datetime, timezone
 import hashlib
 
-def run_ssh(cmd, known_hosts_file, key_path, vps_ip="103.252.137.163"):
+def run_ssh(cmd, known_hosts_file, key_path, vps_ip="103.252.137.163", ssh_user="tawn"):
     full_cmd = [
         "ssh", "-F", "/dev/null", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
         "-o", "PreferredAuthentications=publickey", "-o", "PasswordAuthentication=no",
         "-o", "KbdInteractiveAuthentication=no", "-o", "GSSAPIAuthentication=no",
         "-o", "ForwardAgent=no", "-o", "ClearAllForwardings=yes",
         "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known_hosts_file}",
-        "-i", key_path, f"root@{vps_ip}", cmd
+        "-i", key_path, f"{ssh_user}@{vps_ip}", cmd
     ]
     res = subprocess.run(full_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     return res.returncode, res.stdout, res.stderr
@@ -25,6 +25,7 @@ def main():
     known_hosts = os.path.join(bench_dir, "known_hosts")
     key_path = "/home/tawn/.ssh/vps-only"
     vps_ip = "103.252.137.163"
+    ssh_user = os.environ.get("OPSI_TEST_VPS_SSH_USER", "tawn")
     run_id = "run-3deec7c04e7a01a597deb5b0afc7d6b0"
     target_url = "https://tcip.opsidev.site"
     ns = "opsi-proj-219cc5584acc1-env-a55c5984ddddf2-be11c2ed7a"
@@ -59,7 +60,7 @@ def main():
       fi
     done
     """
-    rc, stdout, stderr = run_ssh(snap_cmd, known_hosts, key_path, vps_ip)
+    rc, stdout, stderr = run_ssh(snap_cmd, known_hosts, key_path, vps_ip, ssh_user)
     with open(os.path.join(bench_dir, "snapshot_before.txt"), "w") as f:
         f.write(stdout)
 
@@ -75,7 +76,7 @@ def main():
         "-o", "KbdInteractiveAuthentication=no", "-o", "GSSAPIAuthentication=no",
         "-o", "ForwardAgent=no", "-o", "ClearAllForwardings=yes",
         "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known_hosts}",
-        "-i", key_path, f"root@{vps_ip}", "bash -s"
+        "-i", key_path, f"{ssh_user}@{vps_ip}", "bash -s"
     ]
     with open(observer_script, "rb") as script_f:
         observer_proc = subprocess.Popen(ssh_observer_cmd, stdin=script_f, stdout=observer_out_f, stderr=subprocess.PIPE, text=True)
@@ -119,12 +120,12 @@ def main():
     print("  -> Observer process terminated.")
 
     print("\n[STEP 5/5] Collecting Post-Benchmark VPS Snapshot and Verifying Health...")
-    rc, stdout, stderr = run_ssh(snap_cmd, known_hosts, key_path, vps_ip)
+    rc, stdout, stderr = run_ssh(snap_cmd, known_hosts, key_path, vps_ip, ssh_user)
     with open(os.path.join(bench_dir, "snapshot_after.txt"), "w") as f:
         f.write(stdout)
 
     # Verify no dangling processes or port-forwards
-    rc, pgrep_out, _ = run_ssh("pgrep -a -f remote_observer || echo 'NO_DANGLING_OBSERVER'", known_hosts, key_path, vps_ip)
+    rc, pgrep_out, _ = run_ssh("pgrep -a -f remote_observer || echo 'NO_DANGLING_OBSERVER'", known_hosts, key_path, vps_ip, ssh_user)
     print(f"  -> Dangling check: {pgrep_out.strip()}")
 
     print("\n[COMPLETE] Live benchmark orchestration finished.")

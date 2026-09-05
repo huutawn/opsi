@@ -386,12 +386,14 @@ export function useConsoleState() {
     const authMethod = String(form.get("auth_method"));
     const host = String(form.get("public_host") ?? "");
     const role = String(form.get("role") ?? "");
+    const probeID = String(form.get("ssh_host_key_probe_id") ?? "");
     const body: Record<string, unknown> = {
       role,
       public_host: host,
       ssh_port: authMethod === "command" ? 0 : Number(form.get("ssh_port")),
       ssh_username: authMethod === "command" ? "" : String(form.get("ssh_username") ?? ""),
       auth_method: authMethod,
+      ...(authMethod !== "command" && probeID ? { ssh_host_key_probe_id: probeID } : {}),
     };
     formElement.reset();
     const command = authMethod === "command";
@@ -473,6 +475,29 @@ export function useConsoleState() {
       },
     );
   }
+  async function resumeBootstrap(sessionID: string, probeID: string, authMethod: string, credential: string, username = "root", onResumed?: () => void | Promise<void>) {
+    if (!currentProject) return;
+    const operation = generation.current;
+    patch({ busy: `resume-${sessionID}` });
+    try {
+      const key = `resume-${sessionID}-${Date.now()}`;
+      const payload: Record<string, unknown> = {
+        ssh_host_key_probe_id: probeID,
+        auth_method: authMethod,
+        ssh_username: username,
+        [authMethod === "private_key" ? "ssh_private_key" : "ssh_password"]: credential,
+      };
+      const updated = await client.resumeBootstrap(currentProject.id, sessionID, payload, key);
+      const events = await client.bootstrapEvents(currentProject.id, updated.id);
+      if (isCurrent(operation, currentProject.id)) patch({ bootstrapEvents: events, bootstrapEventsSessionID: updated.id });
+      await load(currentProject.id, operation);
+      await onResumed?.();
+      return `Bootstrap ${sessionID} resumed successfully.`;
+    } finally {
+      patch({ busy: "" });
+    }
+  }
+
 
   async function loadDeploymentEvents(deploymentID: string) {
     if (!currentProject) return;
@@ -626,6 +651,7 @@ export function useConsoleState() {
       loadBootstrapEvents,
       refreshBootstrap,
       retryBootstrap,
+      resumeBootstrap,
       loadDeploymentEvents,
       hideSensitive: clearSensitive,
       nodeAction,

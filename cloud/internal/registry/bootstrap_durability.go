@@ -296,6 +296,70 @@ func (s *Service) FinishBootstrapSessionForLease(projectID, sessionID, workerID,
 		s.refreshProjectLocked(projectID)
 		return session, nil
 	}
+	if result.Status == "waiting_host_key_confirmation" || result.FailureCode == "SSH_HOST_KEY_MISMATCH" {
+		session.Status = BootstrapWaitingHostKeyConfirmation
+		session.FinishedAt = nil
+		session.NextAttemptAt = nil
+		session.DeadLetteredAt = nil
+		session.LastFailureCode = "SSH_HOST_KEY_MISMATCH"
+		session.LastFailureRedacted = RedactString(result.MessageRedacted)
+		if session.LastFailureRedacted == "" {
+			session.LastFailureRedacted = "SSH host-key mismatch detected"
+		}
+		clearBootstrapLease(&session)
+		session.UpdatedAt = now
+		s.bootstraps[sessionID] = session
+		s.appendBootstrapDurabilityEventLocked(session, "warn", "SSH_HOST_KEY_MISMATCH", session.LastFailureRedacted, now)
+
+		if result.ObservedFingerprint != "" {
+			normHost := normalizeHost(session.PublicHost)
+			var prevFingerprint string
+			if active, ok := s.getActiveTrustLocked(projectID, normHost, session.SSHPort); ok {
+				prevFingerprint = active.Fingerprint
+			}
+			obs := SSHHostKeyObservation{
+				ID:                  newID("probe"),
+				ProjectID:           projectID,
+				Host:                normHost,
+				Port:                session.SSHPort,
+				ResolvedIP:          session.ResolvedIP,
+				Algorithm:           result.ObservedAlgorithm,
+				PublicKey:           result.ObservedPublicKey,
+				Fingerprint:         result.ObservedFingerprint,
+				TrustState:          TrustStateChanged,
+				PreviousFingerprint: prevFingerprint,
+				Status:              ObservationStatusPending,
+				ExpiresAt:           now.Add(10 * time.Minute),
+				CreatedAt:           now,
+				UpdatedAt:           now,
+			}
+			if s.sshObservations == nil {
+				s.sshObservations = map[string]SSHHostKeyObservation{}
+			}
+			s.sshObservations[obs.ID] = obs
+
+			s.audit = append(s.audit, AuditEvent{
+				ID:           newID("aud"),
+				OrgID:        session.OrgID,
+				ProjectID:    projectID,
+				ActorType:    "worker",
+				ActorUserID:  workerID,
+				Action:       "SSH_HOST_KEY_CHANGE_DETECTED",
+				ResourceType: "ssh_host_key_observation",
+				ResourceID:   obs.ID,
+				Result:       "detected",
+				MetadataRedacted: map[string]any{
+					"host":                 normHost,
+					"port":                 session.SSHPort,
+					"fingerprint":          result.ObservedFingerprint,
+					"previous_fingerprint": prevFingerprint,
+				},
+				CreatedAt: now,
+			})
+		}
+		s.refreshProjectLocked(projectID)
+		return session, nil
+	}
 	if result.Status != "failed" || result.FailureCode == "" {
 		return BootstrapSession{}, APIError{Status: 400, Code: "INVALID_BOOTSTRAP_FINISH", Message: "failed bootstrap finish requires failure_code"}
 	}

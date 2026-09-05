@@ -111,7 +111,14 @@ func (h httpCloudClient) Checkpoint(ctx context.Context, lease Lease, checkpoint
 }
 
 func (h httpCloudClient) Finish(ctx context.Context, lease Lease, result FinishResult) error {
-	req := finishRequest{Status: result.Status, Message: result.Message}
+	req := finishRequest{
+		Status:              result.Status,
+		Message:             result.Message,
+		FailureCode:         result.FailureCode,
+		ObservedAlgorithm:   result.ObservedAlgorithm,
+		ObservedPublicKey:   result.ObservedPublicKey,
+		ObservedFingerprint: result.ObservedFingerprint,
+	}
 	if result.Failure != nil {
 		req.FailureCode = result.Failure.Code
 		req.Message = result.Failure.Message
@@ -121,11 +128,14 @@ func (h httpCloudClient) Finish(ctx context.Context, lease Lease, result FinishR
 }
 
 type finishRequest struct {
-	ProjectID   string `json:"project_id"`
-	Status      string `json:"status"`
-	Message     string `json:"message"`
-	FailureCode string `json:"failure_code,omitempty"`
-	Retryable   bool   `json:"retryable,omitempty"`
+	ProjectID           string `json:"project_id"`
+	Status              string `json:"status"`
+	Message             string `json:"message"`
+	FailureCode         string `json:"failure_code,omitempty"`
+	Retryable           bool   `json:"retryable,omitempty"`
+	ObservedAlgorithm   string `json:"observed_algorithm,omitempty"`
+	ObservedPublicKey   string `json:"observed_public_key,omitempty"`
+	ObservedFingerprint string `json:"observed_fingerprint,omitempty"`
 }
 
 func (h httpCloudClient) postState(ctx context.Context, lease Lease, action string, state finishRequest) error {

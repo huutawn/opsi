@@ -3,17 +3,17 @@ set -euo pipefail
 
 YES=0
 DRY_RUN=1
-REBOOT=0
-
 usage() {
   cat <<'EOF'
-Usage: sudo bash scripts/vps-reset.sh [--dry-run] [--yes] [--reboot]
+Usage: sudo bash scripts/vps-reset.sh [--dry-run] [--yes]
 
-Destructively resets an Ubuntu 22.04/24.04 VPS for Opsi manual deploy tests.
+Removes only Opsi-owned bootstrap, Agent, credential, and (when proven Opsi-owned)
+K3s runtime state from an Ubuntu 22.04/24.04 VPS used for Opsi tests.
 Default is --dry-run. Real deletion requires --yes.
 
-Removes K3s/containerd runtime state, CNI/kubelet state, and Opsi config/data.
-Preserves SSH, users, firewall, package cache, repo checkout, Git, and Go.
+It never resets or reboots the machine. It preserves SSH host keys, users,
+firewall, packages, unrelated Docker/container images, repo checkout, Git, and Go.
+K3s is removed only when an Opsi ownership marker or Opsi Agent configuration is present.
 EOF
 }
 
@@ -25,9 +25,6 @@ while [ "$#" -gt 0 ]; do
       ;;
     --dry-run)
       DRY_RUN=1
-      ;;
-    --reboot)
-      REBOOT=1
       ;;
     -h|--help)
       usage
@@ -97,15 +94,20 @@ stop_disable_service() {
   fi
 }
 
-echo "Opsi VPS reset"
+owns_opsi_runtime() {
+  [ -f /etc/opsi/agent.yaml ] || \
+    [ -f /etc/systemd/system/opsi-agent.service ] || \
+    [ -f /var/lib/opsi/swap.marker ]
+}
+
+echo "Opsi VPS cleanup"
 echo "mode: $([ "$DRY_RUN" -eq 1 ] && echo dry-run || echo destructive)"
 echo "target: ${PRETTY_NAME:-Linux systemd}"
 echo
 echo "Will remove:"
 cat <<'EOF'
 - opsi-agent systemd state
-- K3s server/agent install and runtime state
-- K3s containerd/CNI/kubelet state
+- K3s server/agent install and runtime state, only when Opsi ownership is proven
 - Opsi config/data under /etc/opsi, /var/lib/opsi, /opt/opsi
 - Opsi canonical swap (/var/lib/opsi/swapfile) and /etc/fstab entry
 - Opsi temp build/cache files under /tmp
@@ -118,25 +120,23 @@ if [ "$YES" -ne 1 ] && [ "$DRY_RUN" -ne 1 ]; then
 fi
 
 stop_disable_service opsi-agent.service
-stop_disable_service k3s.service
-stop_disable_service k3s-agent.service
 
-if [ -x /usr/local/bin/k3s-killall.sh ]; then
-  run /usr/local/bin/k3s-killall.sh || true
-elif [ "$DRY_RUN" -eq 1 ]; then
-  echo "[dry-run] skip missing /usr/local/bin/k3s-killall.sh"
-fi
-
-if [ -x /usr/local/bin/k3s-uninstall.sh ]; then
-  run /usr/local/bin/k3s-uninstall.sh || true
-elif [ "$DRY_RUN" -eq 1 ]; then
-  echo "[dry-run] skip missing /usr/local/bin/k3s-uninstall.sh"
-fi
-
-if [ -x /usr/local/bin/k3s-agent-uninstall.sh ]; then
-  run /usr/local/bin/k3s-agent-uninstall.sh || true
-elif [ "$DRY_RUN" -eq 1 ]; then
-  echo "[dry-run] skip missing /usr/local/bin/k3s-agent-uninstall.sh"
+OPSI_OWNS_K3S=0
+if owns_opsi_runtime; then
+  OPSI_OWNS_K3S=1
+  stop_disable_service k3s.service
+  stop_disable_service k3s-agent.service
+  if [ -x /usr/local/bin/k3s-killall.sh ]; then
+    run /usr/local/bin/k3s-killall.sh || true
+  fi
+  if [ -x /usr/local/bin/k3s-uninstall.sh ]; then
+    run /usr/local/bin/k3s-uninstall.sh || true
+  fi
+  if [ -x /usr/local/bin/k3s-agent-uninstall.sh ]; then
+    run /usr/local/bin/k3s-agent-uninstall.sh || true
+  fi
+else
+  echo "Opsi ownership marker absent: preserving any existing K3s installation."
 fi
 
 if command -v swapon >/dev/null 2>&1 && command -v swapoff >/dev/null 2>&1; then
@@ -155,13 +155,6 @@ if [ -f /etc/fstab ] && grep -q '^[[:space:]]*/var/lib/opsi/swapfile[[:space:]]'
   fi
 fi
 for path in \
-  /etc/rancher/k3s \
-  /var/lib/rancher/k3s \
-  /var/lib/kubelet \
-  /etc/cni/net.d \
-  /var/lib/cni \
-  /run/k3s \
-  /run/flannel \
   /etc/opsi \
   /var/lib/opsi \
   /opt/opsi \
@@ -173,19 +166,13 @@ for path in \
   remove_path "$path"
 done
 
-if command -v ctr >/dev/null 2>&1; then
-  run ctr --namespace k8s.io images prune || true
-  run ctr --namespace k8s.io snapshots cleanup || true
-elif [ "$DRY_RUN" -eq 1 ]; then
-  echo "[dry-run] skip missing ctr prune"
+if [ "$OPSI_OWNS_K3S" -eq 1 ]; then
+  for path in /etc/rancher/k3s /var/lib/rancher/k3s /var/lib/kubelet /etc/cni/net.d /var/lib/cni /run/k3s /run/flannel; do
+    remove_path "$path"
+  done
 fi
 
 run systemctl daemon-reload
 
-if [ "$REBOOT" -eq 1 ]; then
-  run systemctl reboot
-else
-  echo
-  echo "reset complete. Reboot is recommended before reinstalling K3s:"
-  echo "  sudo reboot"
-fi
+echo
+echo "Opsi cleanup complete. The VPS was not rebooted or otherwise reset."

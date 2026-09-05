@@ -160,7 +160,8 @@ func TestMarkNodeOfflineRevokesOldAgentAndUnblocksReplacement(t *testing.T) {
 	if offline.Status != NodeOffline || offline.FailureCode != "OPERATOR_CONFIRMED_TARGET_RESET" {
 		t.Fatalf("unexpected offline node: %+v", offline)
 	}
-	replacement, err := service.CreateBootstrapSession(projectID, "first_server", "203.0.113.10", "ubuntu", "private_key", "user-1", "replacement", 22)
+	probeID := seedTestProbe(t, service, projectID, "203.0.113.10", 22)
+	replacement, err := service.CreateBootstrapSession(projectID, "first_server", "203.0.113.10", "ubuntu", "private_key", "user-1", "replacement", 22, probeID)
 	if err != nil {
 		t.Fatalf("replacement bootstrap remained blocked: %v", err)
 	}

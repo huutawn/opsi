@@ -251,7 +251,7 @@ func classifyConnectFailure(err error) JobFailure {
 	message := boundedFailureMessage(err.Error())
 	switch {
 	case errors.Is(err, ErrSSHHostKeyVerificationRequired):
-		return JobFailure{Code: "SSH_HOST_KEY_VERIFICATION_REQUIRED", Message: "SSH host-key verification requires operator-provided known_hosts", Retryable: false}
+		return JobFailure{Code: "SSH_HOST_KEY_VERIFICATION_REQUIRED", Message: "SSH host-key verification requires pinned host key", Retryable: false}
 	case errors.Is(err, ErrSSHHostKeyVerificationFailed):
 		return JobFailure{Code: "SSH_HOST_KEY_VERIFICATION_FAILED", Message: "SSH host-key verification failed", Retryable: false}
 	case strings.Contains(strings.ToLower(message), "parse ssh private key"):

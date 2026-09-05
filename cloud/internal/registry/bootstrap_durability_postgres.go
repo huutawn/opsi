@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -26,7 +27,7 @@ func (s PostgresService) RenewBootstrapLease(projectID, sessionID, workerID, raw
 		  AND expires_at > $1
 		  AND status IN ('preflight','configure_swap','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying')
 		RETURNING *
-	) SELECT id, org_id, project_id, environment_id, runtime_id, COALESCE(node_id,''), COALESCE(created_by,''), role, status, idempotency_key, COALESCE(public_host,''), COALESCE(ssh_port,0), COALESCE(ssh_username,''), COALESCE(auth_method,''), expires_at, started_at, finished_at, COALESCE(lease_owner,''), COALESCE(lease_token_hash,''), lease_expires_at, leased_at, COALESCE(attempt_count,0), COALESCE(max_attempts,3), next_attempt_at, lease_heartbeat_at, COALESCE(last_failure_code,''), COALESCE(last_failure_message_redacted,''), dead_lettered_at, checkpoint_schema_version, checkpoint_plan_version, checkpoint_plan_fingerprint, checkpoint_next_step_index, checkpoint_last_completed_step, checkpoint_updated_at, created_at, updated_at FROM renewed`, now, expiresAt, projectID, sessionID, workerID, tokenHash))
+	) SELECT id, org_id, project_id, environment_id, runtime_id, COALESCE(node_id,''), COALESCE(created_by,''), role, status, idempotency_key, COALESCE(public_host,''), COALESCE(ssh_port,0), COALESCE(ssh_username,''), COALESCE(auth_method,''), expires_at, started_at, finished_at, COALESCE(lease_owner,''), COALESCE(lease_token_hash,''), lease_expires_at, leased_at, COALESCE(attempt_count,0), COALESCE(max_attempts,3), next_attempt_at, lease_heartbeat_at, COALESCE(last_failure_code,''), COALESCE(last_failure_message_redacted,''), dead_lettered_at, checkpoint_schema_version, checkpoint_plan_version, checkpoint_plan_fingerprint, checkpoint_next_step_index, checkpoint_last_completed_step, checkpoint_updated_at, COALESCE(ssh_host_key_trust_id,''), COALESCE(resolved_ip,''), created_at, updated_at FROM renewed`, now, expiresAt, projectID, sessionID, workerID, tokenHash))
 	if err == nil {
 		return updated, nil
 	}
@@ -257,7 +258,50 @@ func (s PostgresService) FinishBootstrapSessionForLease(projectID, sessionID, wo
 	var nextAttemptAt, deadLetteredAt, finishedAt any
 	failureCode, failureMessage := "", ""
 	level, step, eventMessage := "info", status, "bootstrap completed after verified Agent heartbeat"
-	if status == "failed" {
+	if status == "waiting_host_key_confirmation" || result.FailureCode == "SSH_HOST_KEY_MISMATCH" {
+		status = BootstrapWaitingHostKeyConfirmation
+		failureCode = "SSH_HOST_KEY_MISMATCH"
+		failureMessage = RedactString(result.MessageRedacted)
+		if failureMessage == "" {
+			failureMessage = "SSH host-key mismatch detected"
+		}
+		level, step, eventMessage = "warn", "SSH_HOST_KEY_MISMATCH", failureMessage
+		nextAttemptAt = nil
+		deadLetteredAt = nil
+		finishedAt = nil
+
+		if result.ObservedFingerprint != "" {
+			normHost := normalizeHost(session.PublicHost)
+			var prevFingerprint string
+			var activeTrust SSHHostKeyTrust
+			if err := tx.QueryRowContext(ctx, sshHostKeyTrustSelectSQL+` WHERE project_id = $1 AND host = $2 AND port = $3 AND status = 'active'`, projectID, normHost, session.SSHPort).Scan(
+				&activeTrust.ID, &activeTrust.ProjectID, &activeTrust.Host, &activeTrust.Port, &activeTrust.Algorithm,
+				&activeTrust.PublicKey, &activeTrust.Fingerprint, &activeTrust.Status, &activeTrust.CreatedBy,
+				&activeTrust.CreatedAt, &activeTrust.SupersededAt, &activeTrust.SupersededBy,
+			); err == nil {
+				prevFingerprint = activeTrust.Fingerprint
+			}
+			obsID := newID("probe")
+			expiresAt := now.Add(10 * time.Minute)
+			if _, err := tx.ExecContext(ctx, `INSERT INTO ssh_host_key_observations(id, project_id, host, port, resolved_ip, algorithm, public_key, fingerprint, trust_state, previous_fingerprint, status, expires_at, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',$11,$12,$12)`,
+				obsID, projectID, normHost, session.SSHPort, session.ResolvedIP, result.ObservedAlgorithm, result.ObservedPublicKey, result.ObservedFingerprint, TrustStateChanged, prevFingerprint, expiresAt, now,
+			); err != nil {
+				return BootstrapSession{}, err
+			}
+
+			meta, _ := json.Marshal(map[string]any{
+				"host":                 normHost,
+				"port":                 session.SSHPort,
+				"fingerprint":          result.ObservedFingerprint,
+				"previous_fingerprint": prevFingerprint,
+			})
+			if _, err := tx.ExecContext(ctx, `INSERT INTO audit_events(id, org_id, project_id, actor_type, actor_id, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,$3,'worker',NULLIF($4,''),'SSH_HOST_KEY_CHANGE_DETECTED','ssh_host_key_observation',$5,'detected',$6,$7)`,
+				newID("aud"), session.OrgID, projectID, workerID, obsID, meta, now,
+			); err != nil {
+				return BootstrapSession{}, err
+			}
+		}
+	} else if status == "failed" {
 		if result.FailureCode == "" {
 			return BootstrapSession{}, APIError{Status: 400, Code: "INVALID_BOOTSTRAP_FINISH", Message: "failed bootstrap finish requires failure_code"}
 		}

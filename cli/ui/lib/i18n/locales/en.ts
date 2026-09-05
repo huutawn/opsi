@@ -44,6 +44,7 @@ export const en = {
   "status.offline": "Offline",
   "status.in_progress": "In Progress",
   "status.unknown": "Unknown",
+  "status.waiting_host_key_confirmation": "Key Confirmation Required",
   "status.succeeded": "Succeeded",
   "status.active": "Active",
   "status.stable": "Stable",

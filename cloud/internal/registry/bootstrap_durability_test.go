@@ -367,7 +367,8 @@ func newBootstrapDurabilityFixture(t *testing.T) (*Service, string, BootstrapSes
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, err := service.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-key", 22)
+	probeID := seedTestProbe(t, service, project.ID, "203.0.113.10", 22)
+	session, err := service.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-key", 22, probeID)
 	if err != nil {
 		t.Fatal(err)
 	}

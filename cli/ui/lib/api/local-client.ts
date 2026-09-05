@@ -4,6 +4,8 @@ import type {
   BuildRecord,
   BuildRecordList,
   BootstrapSession,
+  SSHHostKeyObservation,
+  SSHHostKeyTrust,
   DeploymentJob,
   GitHubBinding,
   GitHubInstallation,
@@ -383,6 +385,37 @@ export class LocalClient {
       idempotencyKey,
       body: JSON.stringify(body),
     });
+  }
+
+  probeSSHHostKey(projectID: string, body: { public_host: string; ssh_port: number }, idempotencyKey?: string) {
+    return this.call<SSHHostKeyObservation>(`/api/local/projects/${projectID}/ssh-host-key-probes`, {
+      method: "POST",
+      write: true,
+      idempotencyKey,
+      body: JSON.stringify(body),
+    });
+  }
+
+  confirmSSHHostKey(projectID: string, probeID: string, body: { fingerprint?: string } = {}, idempotencyKey?: string) {
+    return this.call<SSHHostKeyTrust>(`/api/local/projects/${projectID}/ssh-host-key-probes/${probeID}/confirm`, {
+      method: "POST",
+      write: true,
+      idempotencyKey,
+      body: JSON.stringify(body),
+    });
+  }
+
+  resumeBootstrap(projectID: string, sessionID: string, body: Record<string, unknown>, idempotencyKey?: string) {
+    return this.call<BootstrapSession>(`/api/local/projects/${projectID}/bootstrap-sessions/${sessionID}/resume`, {
+      method: "POST",
+      write: true,
+      idempotencyKey,
+      body: JSON.stringify(body),
+    });
+  }
+
+  sshHostKeyTrusts(projectID: string) {
+    return this.call<{ trusts: SSHHostKeyTrust[] }>(`/api/local/projects/${projectID}/ssh-host-key-trusts`);
   }
 
   retryBootstrap(projectID: string, sessionID: string, idempotencyKey: string) {

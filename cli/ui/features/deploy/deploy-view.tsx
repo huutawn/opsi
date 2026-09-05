@@ -265,7 +265,7 @@ export function DeployView({ console }: { console: ConsoleController }) {
           onRefine={(scope) => void refine(scope)}
         />}
         {run.state === "awaiting_input" && <RepositoryExport canCreate={canMutate} onCreate={createExport} onPreview={previewExport} result={exportResult} />}
-		{needsServer && bootstrapSession && <BootstrapProgress events={bootstrapEvents} session={bootstrapSession} />}
+		{needsServer && bootstrapSession && <BootstrapProgress console={console} events={bootstrapEvents} session={bootstrapSession} />}
 		{needsServer && console.state.bootstrapCommand && <BootstrapCommand command={console.state.bootstrapCommand} />}
         {!['awaiting_input','awaiting_approval'].includes(run.state) && <div className="border border-outline-variant/30 bg-surface-container p-4 sm:p-6"><DeploymentTimeline events={events} run={run} /></div>}
         {run.state === "succeeded" && result && <DeploymentResult canMutate={canMutate} client={client} plan={run.plan} projectID={projectID} result={result} />}

@@ -651,5 +651,8 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := MigrateRepositoryDeploymentWorkflow(ctx, db); err != nil {
 		return err
 	}
-	return MigratePublicHostnameAllocations(ctx, db)
+	if err := MigratePublicHostnameAllocations(ctx, db); err != nil {
+		return err
+	}
+	return MigrateSSHHostKeyTrust(ctx, db)
 }

@@ -112,8 +112,8 @@ The Agent URL and SHA-256 are operator-supplied development release inputs.
 This package does not claim that Agent release signing is implemented.
 
 The Bootstrap Worker accepts SSH password or unencrypted private-key
-credentials. In production mode, configure `ssh_known_hosts_path`; the default
-development mode does not verify the target host key.
+credentials. SSH uses project-scoped host-key trust authority with TOFU on first
+connection and strict identity pinning on subsequent connections.
 
 ### Validate and build
 
