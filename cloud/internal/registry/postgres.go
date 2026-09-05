@@ -869,7 +869,7 @@ func (s PostgresService) CreateBootstrapSession(projectID, role, publicHost, use
 				"fingerprint": obs.Fingerprint,
 				"probe_id":    probeID,
 			})
-			if _, err := tx.ExecContext(ctx, `INSERT INTO audit_events(id, org_id, project_id, actor_type, actor_id, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,$3,'user',NULLIF($4,''),'SSH_HOST_KEY_AUTO_TRUSTED','ssh_host_key_trust',$5,'success',$6,$7)`,
+			if _, err := tx.ExecContext(ctx, `INSERT INTO cloud_audit_events(id, org_id, project_id, actor_type, actor_user_id, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,$3,'user',NULLIF($4,''),'SSH_HOST_KEY_AUTO_TRUSTED','ssh_host_key_trust',$5,'success',$6,$7)`,
 				newID("aud"), project.OrgID, projectID, createdBy, newTrust.ID, meta, now,
 			); err != nil {
 				return BootstrapSession{}, err
@@ -894,7 +894,7 @@ func (s PostgresService) CreateBootstrapSession(projectID, role, publicHost, use
 				"fingerprint": obs.Fingerprint,
 				"probe_id":    probeID,
 			})
-			if _, err := tx.ExecContext(ctx, `INSERT INTO audit_events(id, org_id, project_id, actor_type, actor_id, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,$3,'user',NULLIF($4,''),'SSH_HOST_KEY_MATCHED','ssh_host_key_trust',$5,'success',$6,$7)`,
+			if _, err := tx.ExecContext(ctx, `INSERT INTO cloud_audit_events(id, org_id, project_id, actor_type, actor_user_id, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,$3,'user',NULLIF($4,''),'SSH_HOST_KEY_MATCHED','ssh_host_key_trust',$5,'success',$6,$7)`,
 				newID("aud"), project.OrgID, projectID, createdBy, activeTrust.ID, meta, now,
 			); err != nil {
 				return BootstrapSession{}, err

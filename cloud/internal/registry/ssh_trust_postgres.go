@@ -97,7 +97,7 @@ func (s PostgresService) CreateSSHHostKeyObservation(projectID, host string, por
 		"trust_state": trustState,
 		"fingerprint": fingerprint,
 	})
-	if _, err := tx.ExecContext(ctx, `INSERT INTO audit_events(id, org_id, project_id, actor_type, actor_id, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,$3,'user',NULLIF($4,''),'SSH_HOST_KEY_OBSERVED','ssh_host_key_observation',$5,'success',$6,$7)`,
+	if _, err := tx.ExecContext(ctx, `INSERT INTO cloud_audit_events(id, org_id, project_id, actor_type, actor_user_id, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,$3,'user',NULLIF($4,''),'SSH_HOST_KEY_OBSERVED','ssh_host_key_observation',$5,'success',$6,$7)`,
 		newID("aud"), orgID, projectID, createdBy, obs.ID, meta, now,
 	); err != nil {
 		return SSHHostKeyObservation{}, err
@@ -234,7 +234,7 @@ func (s PostgresService) ConfirmSSHHostKeyRotation(projectID, observationID, act
 		"fingerprint": newTrust.Fingerprint,
 		"probe_id":    observationID,
 	})
-	if _, err := tx.ExecContext(ctx, `INSERT INTO audit_events(id, org_id, project_id, actor_type, actor_id, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,$3,'user',NULLIF($4,''),'SSH_HOST_KEY_ROTATION_CONFIRMED','ssh_host_key_trust',$5,'success',$6,$7)`,
+	if _, err := tx.ExecContext(ctx, `INSERT INTO cloud_audit_events(id, org_id, project_id, actor_type, actor_user_id, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,$3,'user',NULLIF($4,''),'SSH_HOST_KEY_ROTATION_CONFIRMED','ssh_host_key_trust',$5,'success',$6,$7)`,
 		newID("aud"), orgID, projectID, actorID, newTrust.ID, meta, now,
 	); err != nil {
 		return SSHHostKeyTrust{}, err
@@ -329,7 +329,7 @@ func (s PostgresService) ResumeBootstrapSession(projectID, sessionID, observatio
 		"trust_id": activeTrust.ID,
 		"probe_id": observationID,
 	})
-	if _, err := tx.ExecContext(ctx, `INSERT INTO audit_events(id, org_id, project_id, actor_type, actor_id, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,$3,'user',NULLIF($4,''),'BOOTSTRAP_SESSION_RESUMED','bootstrap_session',$5,'success',$6,$7)`,
+	if _, err := tx.ExecContext(ctx, `INSERT INTO cloud_audit_events(id, org_id, project_id, actor_type, actor_user_id, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,$3,'user',NULLIF($4,''),'BOOTSTRAP_SESSION_RESUMED','bootstrap_session',$5,'success',$6,$7)`,
 		newID("aud"), session.OrgID, projectID, actorID, session.ID, meta, now,
 	); err != nil {
 		return BootstrapSession{}, err

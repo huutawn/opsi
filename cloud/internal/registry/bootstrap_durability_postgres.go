@@ -295,7 +295,7 @@ func (s PostgresService) FinishBootstrapSessionForLease(projectID, sessionID, wo
 				"fingerprint":          result.ObservedFingerprint,
 				"previous_fingerprint": prevFingerprint,
 			})
-			if _, err := tx.ExecContext(ctx, `INSERT INTO audit_events(id, org_id, project_id, actor_type, actor_id, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,$3,'worker',NULLIF($4,''),'SSH_HOST_KEY_CHANGE_DETECTED','ssh_host_key_observation',$5,'detected',$6,$7)`,
+			if _, err := tx.ExecContext(ctx, `INSERT INTO cloud_audit_events(id, org_id, project_id, actor_type, actor_user_id, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,$3,'worker',NULLIF($4,''),'SSH_HOST_KEY_CHANGE_DETECTED','ssh_host_key_observation',$5,'detected',$6,$7)`,
 				newID("aud"), session.OrgID, projectID, workerID, obsID, meta, now,
 			); err != nil {
 				return BootstrapSession{}, err
