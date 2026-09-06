@@ -400,9 +400,9 @@ func (e deploymentWorkflowExecutor) ensureConfigurations(ctx context.Context, ru
 		}
 		if applicationExposure(run, key) == "public" && applicationHostname(run, key) != "" {
 			if existing := manualRoutes[service.ID]; existing != nil && (existing.Metadata == nil || existing.Metadata.Rationale != automaticPublicRouteRationale) {
-				draft.PublicRoute = &serviceconfigurationv1.PublicRouteIntent{Hostname: existing.Hostname, Path: existing.Path}
+				draft.PublicRoute = &serviceconfigurationv1.PublicRouteIntent{Hostname: existing.Hostname, Path: existing.Path, AdditionalPaths: append([]string(nil), existing.AdditionalPaths...)}
 			} else {
-				draft.PublicRoute = &serviceconfigurationv1.PublicRouteIntent{Hostname: applicationHostname(run, key), Path: applicationPath(run, key)}
+				draft.PublicRoute = &serviceconfigurationv1.PublicRouteIntent{Hostname: applicationHostname(run, key), Path: applicationPath(run, key), AdditionalPaths: applicationAdditionalPaths(run, key)}
 			}
 		}
 		for _, secret := range run.Plan.Secrets {

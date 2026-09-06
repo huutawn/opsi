@@ -19,8 +19,41 @@ const (
 )
 
 type PublicRouteIntent struct {
-	Hostname string `json:"hostname"`
-	Path     string `json:"path"`
+	Hostname        string   `json:"hostname"`
+	Path            string   `json:"path"`
+	AdditionalPaths []string `json:"additional_paths,omitempty"`
+}
+
+// RoutePaths returns the primary route followed by its canonical aliases.
+// A same-origin dependency may target any of these paths.
+func (r PublicRouteIntent) RoutePaths() []string {
+	paths := make([]string, 0, 1+len(r.AdditionalPaths))
+	paths = append(paths, r.Path)
+	paths = append(paths, r.AdditionalPaths...)
+	return paths
+}
+
+func (r PublicRouteIntent) HasPath(path string) bool {
+	for _, candidate := range r.RoutePaths() {
+		if candidate == path {
+			return true
+		}
+	}
+	return false
+}
+
+func (r PublicRouteIntent) Conflicts(other PublicRouteIntent) bool {
+	if r.Hostname != other.Hostname {
+		return false
+	}
+	for _, firstPath := range r.RoutePaths() {
+		for _, secondPath := range other.RoutePaths() {
+			if exposurev1.ManagedPathsConflict(firstPath, secondPath) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type Binding struct {
@@ -97,12 +130,19 @@ func Normalize(draft ServiceConfigurationDraft) ServiceConfigurationDraft {
 	sort.Slice(draft.SecretReferences, func(i, j int) bool { return draft.SecretReferences[i].EnvName < draft.SecretReferences[j].EnvName })
 	if draft.PublicRoute != nil {
 		route := *draft.PublicRoute
+		route.AdditionalPaths = append([]string(nil), route.AdditionalPaths...)
 		if hostname, err := exposurev1.NormalizeHostname(route.Hostname); err == nil {
 			route.Hostname = hostname
 		}
 		if path, err := exposurev1.NormalizePath(route.Path); err == nil {
 			route.Path = path
 		}
+		for index, path := range route.AdditionalPaths {
+			if normalizedPath, err := exposurev1.NormalizePath(path); err == nil {
+				route.AdditionalPaths[index] = normalizedPath
+			}
+		}
+		sort.Strings(route.AdditionalPaths)
 		draft.PublicRoute = &route
 	}
 	for i := range draft.Bindings {

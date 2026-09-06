@@ -298,13 +298,30 @@ func validateServiceConfiguration(ctx context.Context, resolver DependencyTarget
 		if err != nil {
 			return draft, nil, configurationError("PUBLIC_ROUTE_INVALID", "public_route.path", err.Error())
 		}
-		draft.PublicRoute = &PublicRouteIntent{Hostname: hostname, Path: path}
+		if len(draft.PublicRoute.AdditionalPaths) > exposurev1.MaxAdditionalPaths {
+			return draft, nil, configurationError("PUBLIC_ROUTE_INVALID", "public_route.additional_paths", "too many additional public route paths")
+		}
+		seenPaths := map[string]bool{path: true}
+		additionalPaths := make([]string, 0, len(draft.PublicRoute.AdditionalPaths))
+		for index, additionalPath := range draft.PublicRoute.AdditionalPaths {
+			canonicalPath, pathErr := exposurev1.NormalizePath(additionalPath)
+			if pathErr != nil {
+				return draft, nil, configurationError("PUBLIC_ROUTE_INVALID", fmt.Sprintf("public_route.additional_paths[%d]", index), pathErr.Error())
+			}
+			if seenPaths[canonicalPath] {
+				return draft, nil, configurationError("PUBLIC_ROUTE_INVALID", fmt.Sprintf("public_route.additional_paths[%d]", index), "public route paths must be unique")
+			}
+			seenPaths[canonicalPath] = true
+			additionalPaths = append(additionalPaths, canonicalPath)
+		}
+		sort.Strings(additionalPaths)
+		draft.PublicRoute = &PublicRouteIntent{Hostname: hostname, Path: path, AdditionalPaths: additionalPaths}
 		for _, service := range services {
 			if service.ID == source.ID || service.Configuration.PublicRoute == nil {
 				continue
 			}
 			other := service.Configuration.PublicRoute
-			if other.Hostname == hostname && exposurev1.ManagedPathsConflict(other.Path, path) {
+			if other.Conflicts(*draft.PublicRoute) {
 				return draft, nil, configurationError("PUBLIC_ROUTE_CONFLICT", "public_route", "hostname and path are already used by another Opsi-managed service")
 			}
 		}
@@ -393,7 +410,7 @@ func validateServiceConfiguration(ctx context.Context, resolver DependencyTarget
 				targetPublicRoute = facts.PublicRoute
 				targetDeps = facts.Dependencies
 				if facts.Exposure != nil && targetPublicRoute == nil {
-					targetPublicRoute = &PublicRouteIntent{Hostname: facts.Exposure.Hostname, Path: facts.Exposure.Path}
+					targetPublicRoute = &PublicRouteIntent{Hostname: facts.Exposure.Hostname, Path: facts.Exposure.Path, AdditionalPaths: append([]string(nil), facts.Exposure.AdditionalPaths...)}
 				}
 			}
 		} else {
@@ -486,7 +503,7 @@ func validateServiceConfiguration(ctx context.Context, resolver DependencyTarget
 						return draft, nil, configurationError("SAME_ORIGIN_HOSTNAME_MISMATCH", fmt.Sprintf("dependencies[%d]", index), "same-origin consumer and target must share the same public route hostname")
 					}
 				}
-				if dep.Path != targetPublicRoute.Path {
+				if !targetPublicRoute.HasPath(dep.Path) {
 					return draft, nil, configurationError("SAME_ORIGIN_PATH_MISMATCH", fmt.Sprintf("dependencies[%d].path", index), "same-origin dependency path must match the target public route path")
 				}
 			}
@@ -578,10 +595,15 @@ func validateServiceConfiguration(ctx context.Context, resolver DependencyTarget
 			if err != nil {
 				return draft, nil, configurationError("BROWSER_PATH_INVALID", fmt.Sprintf("bindings[%d].path", index), err.Error())
 			}
-			if path != target.Configuration.PublicRoute.Path {
+			if !target.Configuration.PublicRoute.HasPath(path) {
 				return draft, nil, configurationError("BROWSER_PATH_MISMATCH", fmt.Sprintf("bindings[%d].path", index), "browser path must match the target public route")
 			}
-			values = []deploymentv1.EnvironmentVariable{{Name: binding.EnvName, Value: path}}
+			// Repository analysis emits browser bindings as route evidence. They do
+			// not imply an environment variable unless the user explicitly names
+			// one; same-origin clients can use the path directly in browser code.
+			if binding.EnvName != "" {
+				values = []deploymentv1.EnvironmentVariable{{Name: binding.EnvName, Value: path}}
+			}
 		default:
 			return draft, nil, configurationError("BINDING_KIND_INVALID", fmt.Sprintf("bindings[%d].kind", index), "binding kind must be internal_http or browser_http")
 		}
