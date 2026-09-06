@@ -168,7 +168,11 @@ func kafkaTopicsJob(spec resourcev1.ManagedResourceSpec) map[string]any {
 			"template": map[string]any{
 				"metadata": map[string]any{"labels": labels},
 				"spec": map[string]any{
-					"restartPolicy": "Never",
+					// The client properties are deliberately mounted mode 0400. Keep
+					// the topic Job in the same explicit non-root security context as
+					// the broker, otherwise the image's app user cannot read them.
+					"securityContext": map[string]any{"fsGroup": int64(1000), "runAsUser": int64(1000)},
+					"restartPolicy":   "Never",
 					"containers": []any{map[string]any{
 						"name": "kafka-topics", "image": spec.Image, "imagePullPolicy": "IfNotPresent",
 						"command":      []any{"sh", "-ec", script, "opsi-kafka-topics", spec.Connection.Host + ":9092"},
@@ -191,13 +195,22 @@ func (r ManagedResourceReconciler) ensureKafkaTopics(ctx context.Context, spec r
 	if err != nil {
 		return evidence, err
 	}
+	if current != nil && !exactManagedResourceOwnership(current, spec) {
+		return evidence, managedResourceError{resourcev1.FailureApplyFailed, "managed Kafka topic Job has different ownership"}
+	}
+	if current != nil && number(nested(current, "status", "failed")) > 0 {
+		// Jobs are immutable. A terminal Job from a prior failed reconciliation
+		// must be removed before the same authoritative spec can be retried.
+		if _, err := r.run(ctx, nil, "delete", "job", kafkaTopicsJobName(spec), "-n", managedResourceNamespace(spec), "--ignore-not-found", "--wait=true", "--timeout=2m"); err != nil {
+			return evidence, managedResourceError{resourcev1.FailureApplyFailed, "managed Kafka failed topic Job cleanup failed"}
+		}
+		current = nil
+	}
 	if current == nil {
 		data, _ := json.Marshal(job)
 		if _, err := r.run(ctx, data, "create", "--field-manager="+managedResourceFieldManager, "-f", "-"); err != nil {
 			return evidence, managedResourceError{resourcev1.FailureApplyFailed, "managed Kafka topic Job apply failed"}
 		}
-	} else if !exactManagedResourceOwnership(current, spec) {
-		return evidence, managedResourceError{resourcev1.FailureApplyFailed, "managed Kafka topic Job has different ownership"}
 	}
 	deadline := time.NewTimer(r.kafkaTopicTimeout())
 	defer deadline.Stop()

@@ -94,7 +94,11 @@ func (r *kafkaRunner) Run(_ context.Context, input []byte, _ string, args ...str
 		return nil, nil
 	}
 	if args[0] == "delete" {
-		delete(r.objects, args[1]+"/"+args[2])
+		if args[1] == "job" && len(args) > 2 && !strings.HasPrefix(args[2], "-") {
+			delete(r.objects, "job/"+args[2])
+		} else {
+			delete(r.objects, args[1]+"/"+args[2])
+		}
 		if args[1] == "persistentvolumeclaim" {
 			delete(r.objects, "persistentvolume/pv-kafka")
 		}
@@ -326,6 +330,34 @@ func TestKafkaReconcileCreatesDeclaredTopicsWithMountedCredentials(t *testing.T)
 	manifest := string(encoded)
 	if !strings.Contains(manifest, "calendar.notification-batch.v1") || !strings.Contains(manifest, "client.properties") || strings.Contains(manifest, credential.Password) {
 		t.Fatalf("unsafe or incomplete topic Job manifest: %s", manifest)
+	}
+	podSpec := nested(job, "spec", "template", "spec").(map[string]any)
+	securityContext := podSpec["securityContext"].(map[string]any)
+	if number(securityContext["runAsUser"]) != 1000 || number(securityContext["fsGroup"]) != 1000 {
+		t.Fatalf("topic Job cannot read its mode-0400 Secret: %v", securityContext)
+	}
+}
+
+func TestKafkaReconcileRecreatesOnlyFailedTopicJob(t *testing.T) {
+	spec, credential := kafkaSpec(t)
+	spec.Topics = []resourcev1.KafkaTopic{{Name: "calendar.notification-batch.v1", Partitions: 6}}
+	spec.SpecHash, _ = spec.Hash()
+	runner := &kafkaRunner{objects: map[string]map[string]any{}}
+	reconciler := ManagedResourceReconciler{Runner: runner, Timeout: time.Second, PollInterval: time.Millisecond}
+	if ready := reconciler.Reconcile(context.Background(), cloudrelay.ManagedResourceLease{Action: "apply", LeaseToken: "initial", Spec: spec, Credential: credential}); ready.Status != "ready" {
+		t.Fatalf("initial=%+v", ready)
+	}
+	jobName := kafkaTopicsJobName(spec)
+	runner.objects["job/"+jobName]["status"] = map[string]any{"failed": float64(1)}
+	if retried := reconciler.Reconcile(context.Background(), cloudrelay.ManagedResourceLease{Action: "apply", LeaseToken: "retry", Spec: spec, Credential: credential}); retried.Status != "ready" || retried.Evidence == nil || !retried.Evidence.TopicsReady {
+		t.Fatalf("retried=%+v", retried)
+	}
+	foundDelete := false
+	for _, command := range runner.commands {
+		foundDelete = foundDelete || len(command) >= 3 && command[0] == "delete" && command[1] == "job" && command[2] == jobName
+	}
+	if !foundDelete {
+		t.Fatalf("failed topic Job was not deleted before recreation: %q", runner.commands)
 	}
 }
 
