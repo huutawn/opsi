@@ -48,19 +48,26 @@ func (s *Service) PlacementFacts(_ context.Context, projectID string) (topology.
 	return result, nil
 }
 
-func (s *Service) ResolveManagedResourceTarget(_ context.Context, projectID, environmentID, runtimeID string) (resourcev1.ManagedResourceAssignment, error) {
+func (s *Service) ResolveManagedResourceTargetForType(_ context.Context, projectID, environmentID, runtimeID string, resourceType resourcev1.Type) (resourcev1.ManagedResourceAssignment, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return resolveManagedResourceTarget(projectID, environmentID, runtimeID, s.runtimes, s.nodes, s.agents)
+	return resolveManagedResourceTargetForType(projectID, environmentID, runtimeID, resourceType, s.runtimes, s.nodes, s.agents)
 }
 
-func (s PostgresService) ResolveManagedResourceTarget(ctx context.Context, projectID, environmentID, runtimeID string) (resourcev1.ManagedResourceAssignment, error) {
+func (s PostgresService) ResolveManagedResourceTargetForType(ctx context.Context, projectID, environmentID, runtimeID string, resourceType resourcev1.Type) (resourcev1.ManagedResourceAssignment, error) {
 	var assignment resourcev1.ManagedResourceAssignment
-	err := s.DB.QueryRowContext(ctx, `SELECT r.id,n.id,a.id FROM runtimes r JOIN nodes n ON n.project_id=r.project_id AND n.runtime_id=r.id JOIN agents a ON a.project_id=r.project_id AND a.runtime_id=r.id AND a.node_id=n.id WHERE r.project_id=$1 AND r.environment_id=$2 AND r.id=$3 AND r.type='k3s' AND r.status='ready' AND n.status='healthy' AND a.status='active' AND COALESCE((a.capabilities->>'managed_resources')::boolean,false)=true`, projectID, environmentID, runtimeID).Scan(&assignment.RuntimeID, &assignment.NodeID, &assignment.AgentID)
+	var managedKafka bool
+	err := s.DB.QueryRowContext(ctx, `SELECT r.id,n.id,a.id,COALESCE((a.capabilities->>'managed_kafka')::boolean,false) FROM runtimes r JOIN nodes n ON n.project_id=r.project_id AND n.runtime_id=r.id JOIN agents a ON a.project_id=r.project_id AND a.runtime_id=r.id AND a.node_id=n.id WHERE r.project_id=$1 AND r.environment_id=$2 AND r.id=$3 AND r.type='k3s' AND r.status='ready' AND n.status='healthy' AND a.status='active' AND COALESCE((a.capabilities->>'managed_resources')::boolean,false)=true`, projectID, environmentID, runtimeID).Scan(&assignment.RuntimeID, &assignment.NodeID, &assignment.AgentID, &managedKafka)
 	if errors.Is(err, sql.ErrNoRows) {
 		return assignment, ErrNotFound
 	}
-	return assignment, err
+	if err != nil {
+		return assignment, err
+	}
+	if resourceType == resourcev1.TypeKafka && !managedKafka {
+		return assignment, fmt.Errorf("Agent requires upgrade: managed_kafka capability is required for managed Kafka. Next action: upgrade the Agent")
+	}
+	return assignment, nil
 }
 
 func resolveManagedResourceTarget(projectID, environmentID, runtimeID string, runtimes map[string]Runtime, nodes map[string]Node, agents map[string]Agent) (resourcev1.ManagedResourceAssignment, error) {
@@ -86,6 +93,20 @@ func resolveManagedResourceTarget(projectID, environmentID, runtimeID string, ru
 		return result, ErrNotFound
 	}
 	return result, nil
+}
+
+func resolveManagedResourceTargetForType(projectID, environmentID, runtimeID string, resourceType resourcev1.Type, runtimes map[string]Runtime, nodes map[string]Node, agents map[string]Agent) (resourcev1.ManagedResourceAssignment, error) {
+	assignment, err := resolveManagedResourceTarget(projectID, environmentID, runtimeID, runtimes, nodes, agents)
+	if err != nil {
+		return assignment, err
+	}
+	if resourceType == resourcev1.TypeKafka {
+		agent, ok := agents[assignment.AgentID]
+		if !ok || !capabilityEnabled(agent.Capabilities, "managed_kafka") {
+			return assignment, fmt.Errorf("Agent requires upgrade: managed_kafka capability is required for managed Kafka. Next action: upgrade the Agent")
+		}
+	}
+	return assignment, nil
 }
 
 func (s PostgresService) PlacementFacts(ctx context.Context, projectID string) (topology.Facts, error) {

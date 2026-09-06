@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -18,7 +19,7 @@ import (
 const managedLeaseTTL = 2 * time.Minute
 
 type RuntimeTargetResolver interface {
-	ResolveManagedResourceTarget(context.Context, string, string, string) (resourcev1.ManagedResourceAssignment, error)
+	ResolveManagedResourceTargetForType(context.Context, string, string, string, resourcev1.Type) (resourcev1.ManagedResourceAssignment, error)
 }
 
 type ManagedLease struct {
@@ -104,9 +105,9 @@ func (s Service) ReconcileTopology(ctx context.Context, projectID string, plan t
 		if value.Managed == nil || assignment.Replicas != value.Managed.Replicas || assignment.CPURequestMillicores != value.Managed.CPUMillicores || assignment.MemoryRequestBytes != value.Managed.MemoryBytes {
 			return invalid("MANAGED_RESOURCE_ASSIGNMENT_INVALID", "managed resource placement resources must match the canonical Resource spec")
 		}
-		target, err := targets.ResolveManagedResourceTarget(ctx, projectID, value.EnvironmentID, assignment.RuntimeID)
+		target, err := targets.ResolveManagedResourceTargetForType(ctx, projectID, value.EnvironmentID, assignment.RuntimeID, value.Type)
 		if err != nil {
-			return invalid("MANAGED_RESOURCE_ASSIGNMENT_INVALID", "managed resource assignment has no unique factual Agent target")
+			return invalid("MANAGED_RESOURCE_ASSIGNMENT_INVALID", "managed resource assignment has no unique factual Agent target: "+err.Error())
 		}
 		credentialID := ""
 		if managedCredentialRequired(value.Type) {
@@ -182,9 +183,14 @@ func compileManaged(value resourcev1.Resource, assignment resourcev1.ManagedReso
 		if credentialID == "" {
 			return resourcev1.ManagedResourceSpec{}, invalid(resourcev1.FailureCredentialUnavailable, "managed PostgreSQL credential identity is unavailable")
 		}
+	} else if value.Type == resourcev1.TypeKafka {
+		portName, protocol, database, connectionURL = "kafka", resourcev1.ProtocolKafka, "", ""
+		if credentialID == "" {
+			return resourcev1.ManagedResourceSpec{}, invalid(resourcev1.FailureCredentialUnavailable, "managed Kafka credential identity is unavailable")
+		}
 	}
 	storage := value.Managed.Storage
-	if value.Type == resourcev1.TypePostgres && storage.PolicyRef == "" {
+	if (value.Type == resourcev1.TypePostgres || value.Type == resourcev1.TypeKafka) && storage.PolicyRef == "" {
 		storage.PolicyRef = resourcev1.StoragePolicyDefault
 	}
 	spec := resourcev1.ManagedResourceSpec{
@@ -194,6 +200,7 @@ func compileManaged(value resourcev1.Resource, assignment resourcev1.ManagedReso
 		Ports: []resourcev1.ManagedResourcePort{{Name: portName, Port: int32(definition.DefaultPort), Protocol: protocol}}, Storage: storage,
 		Connection:        resourcev1.ManagedResourceConnection{ServiceName: serviceName, Host: host, Port: int32(definition.DefaultPort), Protocol: protocol, Database: database, URL: connectionURL},
 		CredentialID:      credentialID,
+		ServiceConfig:     value.Managed.ServiceConfig,
 		ConfigurationHash: configurationHash, TopologyRevision: topologyRevision, TopologyHash: topologyHash,
 	}
 	hash, err := spec.Hash()
@@ -276,7 +283,7 @@ func (s Service) CompleteManaged(ctx context.Context, projectID, resourceID stri
 		if value.Runtime.Spec.CredentialID != "" && (s.Credentials == nil || s.Credentials.Delete(ctx, value.Runtime.Spec.CredentialID) != nil) {
 			return resourcev1.Resource{}, invalid(resourcev1.FailureCredentialUnavailable, "managed resource credential could not be deleted")
 		}
-		if value.Type == resourcev1.TypePostgres {
+		if managedStorageRequired(value.Type) {
 			retained, retainedErr := retainedStorageFromDeletion(value, result.Evidence, s.clock())
 			if retainedErr != nil {
 				return resourcev1.Resource{}, retainedErr
@@ -364,11 +371,16 @@ func (s Service) completePostgresBindings(ctx context.Context, target resourcev1
 }
 
 func factualReady(spec resourcev1.ManagedResourceSpec, evidence *resourcev1.ManagedResourceEvidence) bool {
-	return evidence != nil && evidence.ObservedSpecHash == spec.SpecHash && evidence.WorkloadReady && evidence.PodReady && evidence.ServiceReady && (!managedCredentialRequired(spec.ResourceType) || evidence.SecretReady && evidence.AuthReady) && (spec.ResourceType != resourcev1.TypePostgres || evidence.StorageReady && evidence.VolumeMounted && evidence.PVCName != "" && evidence.PVName != "") && evidence.Image == spec.Image && imageIDMatches(evidence.ImageID, spec.Image) && evidence.AvailableReplicas >= spec.Replicas
+	return evidence != nil && evidence.ObservedSpecHash == spec.SpecHash && evidence.WorkloadReady && evidence.PodReady && evidence.ServiceReady && (!managedCredentialRequired(spec.ResourceType) || evidence.SecretReady && evidence.AuthReady) && (!managedStorageRequired(spec.ResourceType) || evidence.StorageReady && evidence.VolumeMounted && evidence.PVCName != "" && evidence.PVName != "") && evidence.Image == spec.Image && imageIDMatches(evidence.ImageID, spec.Image) && evidence.AvailableReplicas >= spec.Replicas
+}
+
+func managedStorageRequired(resourceType resourcev1.Type) bool {
+	definition, ok := resourcev1.Definition(resourceType)
+	return ok && definition.Storage.Required
 }
 
 func managedCredentialRequired(resourceType resourcev1.Type) bool {
-	return resourceType == resourcev1.TypeRedis || resourceType == resourcev1.TypePostgres
+	return resourceType == resourcev1.TypeRedis || resourceType == resourcev1.TypePostgres || resourceType == resourcev1.TypeKafka
 }
 
 func imageIDMatches(imageID, reference string) bool {
@@ -391,6 +403,16 @@ func runtimeRefs(target resourcev1.Resource) []resourcev1.RuntimeConnectionRefer
 			for _, name := range []string{"USER", "PASSWORD", "URL"} {
 				refs = append(refs, resourcev1.RuntimeConnectionReference{Name: name, Sensitivity: resourcev1.ValueSecret, SecretRef: &resourcev1.SecretReference{SecretID: target.Runtime.Spec.CredentialID}})
 			}
+		} else if target.Type == resourcev1.TypeKafka {
+			bootstrapServers := net.JoinHostPort(target.Runtime.Spec.Connection.Host, strconv.Itoa(int(target.Runtime.Spec.Connection.Port)))
+			secret := &resourcev1.SecretReference{SecretID: target.Runtime.Spec.CredentialID}
+			refs = append(refs,
+				resourcev1.RuntimeConnectionReference{Name: "BOOTSTRAP_SERVERS", Sensitivity: resourcev1.ValueNonSecret, Value: bootstrapServers},
+				resourcev1.RuntimeConnectionReference{Name: "SECURITY_PROTOCOL", Sensitivity: resourcev1.ValueNonSecret, Value: "SASL_PLAINTEXT"},
+				resourcev1.RuntimeConnectionReference{Name: "SASL_MECHANISM", Sensitivity: resourcev1.ValueNonSecret, Value: "PLAIN"},
+				resourcev1.RuntimeConnectionReference{Name: "USER", Sensitivity: resourcev1.ValueSecret, SecretRef: secret},
+				resourcev1.RuntimeConnectionReference{Name: "PASSWORD", Sensitivity: resourcev1.ValueSecret, SecretRef: secret},
+			)
 		} else {
 			refs = append(refs, resourcev1.RuntimeConnectionReference{Name: "URL", Sensitivity: resourcev1.ValueNonSecret, Value: target.Runtime.Spec.Connection.URL})
 		}

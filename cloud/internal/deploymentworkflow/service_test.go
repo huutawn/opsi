@@ -68,6 +68,27 @@ func TestApprovalRejectsInvalidManagedStorageBeforeProvisioning(t *testing.T) {
 	}
 }
 
+func TestKafkaPlanRequiresSeparateExperimentalAcknowledgement(t *testing.T) {
+	service, run, _ := fixture(t)
+	draft := run.Plan
+	draft.Resources = []repositoryanalysis.Resource{{
+		LogicalName: "kafka", Type: "kafka", Managed: true, Required: true,
+		Persistence: &repositoryanalysis.Persistence{Persistent: true, SizeBytes: resourcev1.DefaultKafkaStorageBytes, PolicyRef: resourcev1.StoragePolicyDefault},
+		Settings:    map[string]string{"num_partitions": "3", "retention_hours": "168"},
+	}}
+	if err := refreshHash(&draft); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.UpdatePlan(context.Background(), run.ProjectID, run.ID, "user-1", run.Plan.Hash, draft); errorCode(err) != "DEPLOYMENT_PLAN_INVALID" {
+		t.Fatalf("missing acknowledgement error=%v", err)
+	}
+	draft.Resources[0].Acknowledgements = []string{"kafka_single_node_experimental"}
+	updated, err := service.UpdatePlan(context.Background(), run.ProjectID, run.ID, "user-1", run.Plan.Hash, draft)
+	if err != nil || updated.State != StateAwaitingApproval || len(updated.Plan.Resources[0].Acknowledgements) != 1 {
+		t.Fatalf("updated=%+v err=%v", updated, err)
+	}
+}
+
 func TestPlanHashBindsAnalysisScopeCoverageAndTruncationReason(t *testing.T) {
 	_, run, _ := fixture(t)
 	base := run.Plan.Hash

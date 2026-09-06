@@ -228,7 +228,7 @@ func (e deploymentWorkflowExecutor) ensureResources(ctx context.Context, run dep
 	result := map[string]resourcev1.Resource{}
 	ids := []string{}
 	for _, detected := range run.Plan.Resources {
-		if !detected.Managed || detected.Type == "kafka" {
+		if !detected.Managed {
 			continue
 		}
 		value := byName[detected.LogicalName]

@@ -134,7 +134,7 @@ func AllTools() []Tool {
 		},
 		{
 			Name:        "managed_resources_list",
-			Description: "List managed resources (PostgreSQL, Valkey, etc.) with safe metadata (read-only).",
+			Description: "List managed resources (PostgreSQL, Valkey, Kafka, etc.) with safe metadata (read-only).",
 			InputSchema: ToolInputSchema{
 				Type: "object",
 				Properties: map[string]PropertyDoc{
@@ -155,7 +155,7 @@ func AllTools() []Tool {
 		},
 		{
 			Name:        "managed_resource_get",
-			Description: "Get safe details for a single managed resource (read-only).",
+			Description: "Get safe details for a single managed resource (PostgreSQL, Valkey, Kafka, read-only).",
 			InputSchema: ToolInputSchema{
 				Type: "object",
 				Properties: map[string]PropertyDoc{

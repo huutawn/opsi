@@ -422,7 +422,6 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 	resources := []Resource{}
 	deps := []Dependency{}
 	issues := []Issue{}
-	kafkaIssueAdded := false
 	kafkaDisabled := false
 	resourceNames := map[string]string{}
 	resourceLogicalNames := map[string]string{}
@@ -448,34 +447,46 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 				logicalName = "kafka"
 			}
 			recommendation := "Managed " + displayResource(kind)
-			if kind == "kafka" {
-				recommendation = "Set Kafka__Enabled=false unless an external Kafka endpoint is supplied"
-				if !kafkaIssueAdded {
-					issues = append(issues, Issue{Code: "KAFKA_UNSUPPORTED", Message: "Kafka was detected but is not a managed Opsi resource.", Path: composePath, Resolution: recommendation, Blocking: true})
-					kafkaIssueAdded = true
-				}
-			}
 			evidence := Evidence{Path: composePath, Kind: "compose_image", Reason: "Compose declares image " + service.Image + ".", Confidence: ConfidenceHigh}
 			var persistence *Persistence
-			if (len(service.Volumes) > 0 || kind == "postgres") && kind != "kafka" {
-				persistence = &Persistence{Persistent: true, SizeBytes: resourcev1.DefaultPostgresStorageBytes, PolicyRef: resourcev1.StoragePolicyDefault}
+			if len(service.Volumes) > 0 || kind == "postgres" || kind == "kafka" {
+				storageBytes := resourcev1.DefaultPostgresStorageBytes
+				if kind == "kafka" {
+					storageBytes = resourcev1.DefaultKafkaStorageBytes
+				}
+				persistence = &Persistence{Persistent: true, SizeBytes: storageBytes, PolicyRef: resourcev1.StoragePolicyDefault}
 				if len(service.Volumes) > 0 {
 					evidence.Reason += " A persistent volume is mounted."
-				} else {
+				} else if kind == "postgres" {
 					evidence.Reason += " PostgreSQL uses persistent managed storage by default."
+				} else if kind == "kafka" {
+					evidence.Reason += " Kafka uses persistent managed storage by default."
 				}
+			}
+			var settings map[string]string
+			if kind == "kafka" {
+				composeEnv, _ := composeEnvironment(service.Environment)
+				settings = extractKafkaComposeSettings(composeEnv)
 			}
 			merged := false
 			for i := range resources {
 				if resources[i].LogicalName == logicalName && resources[i].Type == kind {
 					resources[i].Evidence = append(resources[i].Evidence, evidence)
 					resources[i].Reason += " " + evidence.Reason
+					if len(settings) > 0 {
+						if resources[i].Settings == nil {
+							resources[i].Settings = map[string]string{}
+						}
+						for sk, sv := range settings {
+							resources[i].Settings[sk] = sv
+						}
+					}
 					merged = true
 					break
 				}
 			}
 			if !merged {
-				resources = append(resources, Resource{LogicalName: logicalName, Type: kind, Managed: kind != "kafka", Required: kind != "kafka", Persistence: persistence, Recommendation: recommendation, Confidence: ConfidenceHigh, Reason: evidence.Reason, Evidence: []Evidence{evidence}})
+				resources = append(resources, Resource{LogicalName: logicalName, Type: kind, Managed: true, Required: true, Persistence: persistence, Settings: settings, Recommendation: recommendation, Confidence: ConfidenceHigh, Reason: evidence.Reason, Evidence: []Evidence{evidence}})
 			}
 			resourceNames[name] = kind
 			resourceLogicalNames[name] = logicalName
@@ -519,7 +530,7 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 			if resourceLogicalNames[target] != "" {
 				logicalTarget = resourceLogicalNames[target]
 			}
-			dependency := Dependency{From: slug(name), To: logicalTarget, Protocol: protocol, Required: protocol != "http" && protocol != "kafka", Confidence: ConfidenceHigh, Reason: evidence.Reason, Evidence: []Evidence{evidence}}
+			dependency := Dependency{From: slug(name), To: logicalTarget, Protocol: protocol, Required: protocol != "http", Confidence: ConfidenceHigh, Reason: evidence.Reason, Evidence: []Evidence{evidence}}
 			dependency.Injections = composeInjections(node, protocol)
 			if contract := composeHealthVerification(node); contract != nil {
 				dependency.Verification = contract
@@ -528,12 +539,6 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 		}
 	}
 	if kafkaDisabled {
-		for i := range issues {
-			if issues[i].Code == "KAFKA_UNSUPPORTED" {
-				issues[i].Blocking = false
-				issues[i].Resolution = "Kafka__Enabled=false"
-			}
-		}
 		for i := range resources {
 			if resources[i].Type == "kafka" {
 				resources[i].Managed = false
@@ -541,8 +546,36 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 				resources[i].Recommendation = "Detected but disabled by Kafka__Enabled=false"
 			}
 		}
+		for i := range deps {
+			if deps[i].Protocol == "kafka" || deps[i].To == "kafka" {
+				deps[i].Required = false
+			}
+		}
 	}
 	return apps, resources, deps, issues
+}
+
+func extractKafkaComposeSettings(env map[string]string) map[string]string {
+	if len(env) == 0 {
+		return nil
+	}
+	settings := map[string]string{}
+	for k, v := range env {
+		switch k {
+		case "KAFKA_NUM_PARTITIONS":
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 1 && n <= 100 {
+				settings["num_partitions"] = strconv.FormatInt(n, 10)
+			}
+		case "KAFKA_LOG_RETENTION_HOURS":
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 1 && n <= 8760 {
+				settings["retention_hours"] = strconv.FormatInt(n, 10)
+			}
+		}
+	}
+	if len(settings) == 0 {
+		return nil
+	}
+	return settings
 }
 
 func kafkaEnvironmentDisabled(environment map[string]string) bool {
@@ -981,7 +1014,7 @@ func validateDetected(result *Result) {
 		if !dependency.Required {
 			continue
 		}
-		if dependency.Protocol != "postgres" && dependency.Protocol != "redis" && dependency.Protocol != "nats" && dependency.Verification == nil {
+		if dependency.Protocol != "postgres" && dependency.Protocol != "redis" && dependency.Protocol != "nats" && dependency.Protocol != "kafka" && dependency.Verification == nil {
 			result.Issues = append(result.Issues, Issue{Code: "DEPENDENCY_VERIFICATION_REQUIRED", Message: "Required dependency " + dependency.From + " → " + dependency.To + " has no verification contract.", Resolution: "Add a consumer HTTP verification contract or mark the dependency optional.", Blocking: true})
 		}
 	}

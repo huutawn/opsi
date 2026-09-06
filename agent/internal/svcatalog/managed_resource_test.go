@@ -153,7 +153,7 @@ func TestValkeyReadinessUsesPinnedCLIAuthContractWithoutPasswordArg(t *testing.T
 func TestValkeyReadinessAuthFailureIsCategorizedWithoutCredentialLeak(t *testing.T) {
 	spec, credential := valkeySpec(t)
 	runner := &managedRunner{objects: map[string]map[string]any{}, execError: errors.New("WRONGPASS invalid username-password pair")}
-	result := (ManagedResourceReconciler{Runner: runner}).Reconcile(context.Background(), cloudrelay.ManagedResourceLease{Action: "apply", LeaseToken: "lease", Spec: spec, Credential: credential})
+	result := (ManagedResourceReconciler{Runner: runner, Timeout: 100 * time.Millisecond, PollInterval: time.Millisecond}).Reconcile(context.Background(), cloudrelay.ManagedResourceLease{Action: "apply", LeaseToken: "lease", Spec: spec, Credential: credential})
 	if result.Status != "failed" || result.FailureCode != resourcev1.FailureAuthFailed || strings.Contains(result.FailureMessageRedacted, credential.Username) || strings.Contains(result.FailureMessageRedacted, credential.Password) {
 		t.Fatalf("result=%+v", result)
 	}

@@ -157,8 +157,8 @@ func retainedStorageDestroySpec(value resourcev1.RetainedStorage) resourcev1.Ret
 }
 
 func retainedStorageFromDeletion(value resourcev1.Resource, evidence *resourcev1.ManagedResourceEvidence, now time.Time) (resourcev1.RetainedStorage, error) {
-	if value.Runtime == nil || evidence == nil || !evidence.Deleted || !evidence.StorageRetained || evidence.ObservedSpecHash != value.Runtime.Spec.SpecHash || evidence.Namespace == "" || evidence.PVCName == "" || evidence.PVCUID == "" || evidence.PVName == "" || evidence.PVUID == "" || evidence.StorageClass == "" || evidence.ReclaimPolicy == "" || evidence.ActualStorage == "" || evidence.RequestedBytes != value.Runtime.Spec.Storage.SizeBytes || evidence.StorageHash != resourcev1.ManagedResourceStorageHash(value.Runtime.Spec) {
-		return resourcev1.RetainedStorage{}, invalid(resourcev1.FailureRetainedStorageIdentityMismatch, "managed PostgreSQL delete did not prove exact retained storage identity")
+	if !managedStorageRequired(value.Type) || value.Runtime == nil || evidence == nil || !evidence.Deleted || !evidence.StorageRetained || evidence.ObservedSpecHash != value.Runtime.Spec.SpecHash || evidence.Namespace == "" || evidence.PVCName == "" || evidence.PVCUID == "" || evidence.PVName == "" || evidence.PVUID == "" || evidence.StorageClass == "" || evidence.ReclaimPolicy == "" || evidence.ActualStorage == "" || evidence.RequestedBytes != value.Runtime.Spec.Storage.SizeBytes || evidence.StorageHash != resourcev1.ManagedResourceStorageHash(value.Runtime.Spec) {
+		return resourcev1.RetainedStorage{}, invalid(resourcev1.FailureRetainedStorageIdentityMismatch, "managed resource delete did not prove exact retained storage identity")
 	}
 	return resourcev1.RetainedStorage{
 		SchemaVersion: resourcev1.RetainedStorageSchemaVersion, ID: newID("rsto"), OriginalResourceID: value.ID,

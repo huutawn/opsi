@@ -111,6 +111,58 @@ func detectConnectionEvidence(filePath, text string) ([]connectionEvidence, bool
 			add("nats", environment, source, "Repository configuration declares an exact NATS atomic key.")
 		}
 	}
+	for _, environment := range []string{"KAFKA_BOOTSTRAP_SERVERS", "KAFKA_BROKERS"} {
+		if containsIdentifier(text, environment) {
+			add("kafka", environment, serviceconfigurationv1.SourceKafkaBootstrapServers, "Repository configuration declares an exact Kafka bootstrap servers key.")
+		}
+	}
+	for environment, source := range map[string]string{
+		"KAFKA_SECURITY_PROTOCOL": serviceconfigurationv1.SourceKafkaSecurityProtocol,
+		"KAFKA_SASL_MECHANISM":    serviceconfigurationv1.SourceKafkaSASLMechanism,
+		"KAFKA_SASL_USERNAME":     serviceconfigurationv1.SourceCredentialUsername,
+		"KAFKA_SASL_PASSWORD":     serviceconfigurationv1.SourceCredentialPassword,
+		"KAFKA_USERNAME":          serviceconfigurationv1.SourceCredentialUsername,
+		"KAFKA_PASSWORD":          serviceconfigurationv1.SourceCredentialPassword,
+		"KAFKA_HOST":              serviceconfigurationv1.SourceResourceHost,
+		"KAFKA_PORT":              serviceconfigurationv1.SourceResourcePort,
+	} {
+		if containsIdentifier(text, environment) {
+			add("kafka", environment, source, "Repository configuration declares an exact Kafka environment key.")
+		}
+	}
+	for environment, source := range map[string]string{
+		"Kafka__BootstrapServers": serviceconfigurationv1.SourceKafkaBootstrapServers,
+		"Kafka__SecurityProtocol": serviceconfigurationv1.SourceKafkaSecurityProtocol,
+		"Kafka__SaslMechanism":    serviceconfigurationv1.SourceKafkaSASLMechanism,
+		"Kafka__SaslUsername":     serviceconfigurationv1.SourceCredentialUsername,
+		"Kafka__SaslPassword":     serviceconfigurationv1.SourceCredentialPassword,
+		"Kafka__Username":         serviceconfigurationv1.SourceCredentialUsername,
+		"Kafka__Password":         serviceconfigurationv1.SourceCredentialPassword,
+	} {
+		if strings.Contains(text, environment) || strings.Contains(text, strings.ReplaceAll(environment, "__", ":")) {
+			add("kafka", environment, source, ".NET Kafka configuration declares an exact key.")
+		}
+	}
+	for environment, source := range map[string]string{
+		"SPRING_KAFKA_BOOTSTRAP_SERVERS":          serviceconfigurationv1.SourceKafkaBootstrapServers,
+		"SPRING_KAFKA_SECURITY_PROTOCOL":          serviceconfigurationv1.SourceKafkaSecurityProtocol,
+		"SPRING_KAFKA_PROPERTIES_SASL_MECHANISM":  serviceconfigurationv1.SourceKafkaSASLMechanism,
+		"SPRING_KAFKA_CONSUMER_BOOTSTRAP_SERVERS": serviceconfigurationv1.SourceKafkaBootstrapServers,
+		"SPRING_KAFKA_PRODUCER_BOOTSTRAP_SERVERS": serviceconfigurationv1.SourceKafkaBootstrapServers,
+	} {
+		if containsIdentifier(text, environment) {
+			add("kafka", environment, source, "Spring Kafka configuration declares an exact environment key.")
+		}
+	}
+	if containsAny("spring.kafka.bootstrap-servers", "spring.kafka.bootstrap_servers") {
+		add("kafka", "SPRING_KAFKA_BOOTSTRAP_SERVERS", serviceconfigurationv1.SourceKafkaBootstrapServers, "Spring Kafka configuration declares a bootstrap servers property.")
+	}
+	if containsAny("spring.kafka.security.protocol") {
+		add("kafka", "SPRING_KAFKA_SECURITY_PROTOCOL", serviceconfigurationv1.SourceKafkaSecurityProtocol, "Spring Kafka configuration declares a security protocol property.")
+	}
+	if containsAny("spring.kafka.properties.sasl.mechanism") {
+		add("kafka", "SPRING_KAFKA_PROPERTIES_SASL_MECHANISM", serviceconfigurationv1.SourceKafkaSASLMechanism, "Spring Kafka configuration declares a SASL mechanism property.")
+	}
 	sort.Slice(values, func(i, j int) bool {
 		return values[i].Protocol+"\x00"+values[i].EnvironmentName < values[j].Protocol+"\x00"+values[j].EnvironmentName
 	})
@@ -190,6 +242,9 @@ func sourceForEnvironment(protocol, environment string) (string, bool) {
 	text := environment
 	if environment == "SignalR__Redis__ConnectionString" {
 		text += " SignalR Redis ConnectionString"
+	}
+	if strings.HasPrefix(environment, "Kafka__") {
+		text += " " + strings.ReplaceAll(environment, "__", ":")
 	}
 	values, _ := detectConnectionEvidence("environment", text)
 	for _, value := range values {

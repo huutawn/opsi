@@ -102,7 +102,7 @@ func TestManagedResourceValidation(t *testing.T) {
 		name   string
 		mutate func(*resourcev1.CreateRequest)
 	}{
-		{"unknown", func(request *resourcev1.CreateRequest) { request.Type, request.Managed.Type = "kafka", "kafka" }},
+		{"unknown", func(request *resourcev1.CreateRequest) { request.Type, request.Managed.Type = "cassandra", "cassandra" }},
 		{"cpu", func(request *resourcev1.CreateRequest) { request.Managed.CPUMillicores = 0 }},
 		{"memory", func(request *resourcev1.CreateRequest) { request.Managed.MemoryBytes = 0 }},
 		{"storage size", func(request *resourcev1.CreateRequest) { request.Managed.Storage.SizeBytes = 0 }},
@@ -212,11 +212,11 @@ func testService() Service {
 func managedRequest(resourceType resourcev1.Type) resourcev1.CreateRequest {
 	persistent := resourceType != resourcev1.TypeNATS && resourceType != resourcev1.TypeRedis
 	var refs []resourcev1.SecretReference
-	if resourceType != resourcev1.TypeRedis && resourceType != resourcev1.TypePostgres {
+	if resourceType != resourcev1.TypeRedis && resourceType != resourcev1.TypePostgres && resourceType != resourcev1.TypeKafka {
 		refs = []resourcev1.SecretReference{{SecretID: "secret-" + string(resourceType)}}
 	}
 	storage := resourcev1.StorageRequest{Persistent: persistent, SizeBytes: map[bool]int64{true: 1 << 30}[persistent]}
-	if resourceType == resourcev1.TypePostgres {
+	if resourceType == resourcev1.TypePostgres || resourceType == resourcev1.TypeKafka {
 		storage.PolicyRef = resourcev1.StoragePolicyDefault
 	}
 	return resourcev1.CreateRequest{
@@ -236,5 +236,73 @@ func assertReferences(t *testing.T, references []resourcev1.RuntimeConnectionRef
 		if reference.Sensitivity == resourcev1.ValueNonSecret && reference.SecretRef != nil {
 			t.Fatalf("non-secret uses secret reference: %+v", reference)
 		}
+	}
+}
+
+func TestKafkaManagedResourceLifecycleAndUpdate(t *testing.T) {
+	service := testService()
+	created, _, err := service.Create(context.Background(), "project-1", "user-1", "kafka-1", managedRequest(resourcev1.TypeKafka))
+	if err != nil {
+		t.Fatalf("kafka create failed: %v", err)
+	}
+	plan := topologyv1.Plan{
+		Assignments: []topologyv1.Assignment{{
+			ServiceKey: created.ID, EnvironmentID: "env-1", RuntimeID: "runtime-1",
+			Replicas: 1, CPURequestMillicores: 250, MemoryRequestBytes: 256 << 20,
+		}},
+		PlanHash: strings.Repeat("k", 64),
+		Revision: 1,
+	}
+	if err := service.ReconcileTopology(context.Background(), "project-1", plan, staticTarget{}); err != nil {
+		t.Fatalf("reconcile kafka topology: %v", err)
+	}
+	planned, _ := service.Get(context.Background(), "project-1", created.ID)
+	if planned.Runtime == nil || planned.Runtime.Spec.ResourceType != resourcev1.TypeKafka || planned.Runtime.Spec.Ports[0].Port != 9092 || planned.Runtime.Spec.Connection.Port != 9092 || planned.Runtime.Spec.CredentialID == "" {
+		t.Fatalf("planned kafka runtime=%+v", planned.Runtime)
+	}
+	initialHash := planned.Runtime.Spec.SpecHash
+
+	// Valid update: CPU/RAM/ServiceConfig
+	next := *planned.Managed
+	next.CPUMillicores = 500
+	next.MemoryBytes = 1 << 30
+	next.ServiceConfig = map[string]string{"num_partitions": "5", "retention_hours": "336"}
+	updated, err := service.Update(context.Background(), "project-1", created.ID, resourcev1.UpdateRequest{Managed: &next})
+	if err != nil {
+		t.Fatalf("kafka update failed: %v", err)
+	}
+	if updated.Runtime.Spec.SpecHash == initialHash {
+		t.Fatal("spec hash did not change after valid update")
+	}
+	if updated.Lifecycle != resourcev1.LifecyclePlanned {
+		t.Fatalf("updated lifecycle=%s, want planned", updated.Lifecycle)
+	}
+
+	// Reject version change
+	badVersion := *updated.Managed
+	badVersion.Version = "5.0.0"
+	if _, err := service.Update(context.Background(), "project-1", created.ID, resourcev1.UpdateRequest{Managed: &badVersion}); err == nil {
+		t.Fatal("unsupported version change accepted")
+	}
+
+	// Reject replica change
+	badReplicas := *updated.Managed
+	badReplicas.Replicas = 3
+	if _, err := service.Update(context.Background(), "project-1", created.ID, resourcev1.UpdateRequest{Managed: &badReplicas}); err == nil {
+		t.Fatal("unsupported replica change accepted")
+	}
+
+	// Reject storage resize
+	badStorage := *updated.Managed
+	badStorage.Storage.SizeBytes = 20 << 30
+	if _, err := service.Update(context.Background(), "project-1", created.ID, resourcev1.UpdateRequest{Managed: &badStorage}); err == nil {
+		t.Fatal("unsupported storage resize accepted")
+	}
+
+	// Reject invalid config
+	badConfig := *updated.Managed
+	badConfig.ServiceConfig = map[string]string{"num_partitions": "999"}
+	if _, err := service.Update(context.Background(), "project-1", created.ID, resourcev1.UpdateRequest{Managed: &badConfig}); err == nil {
+		t.Fatal("invalid config accepted")
 	}
 }

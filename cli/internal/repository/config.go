@@ -15,6 +15,7 @@ import (
 	"unicode"
 
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
+	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	"gopkg.in/yaml.v3"
 )
 
@@ -292,7 +293,9 @@ func ValidateConfig(repoRoot string, cfg *ConfigV2) error {
 			return fmt.Errorf("resource %s has unsupported type %q", resource.LogicalName, resource.Type)
 		}
 		if resource.Managed && resource.Type == "kafka" {
-			return fmt.Errorf("resource %s: managed Kafka is unsupported", resource.LogicalName)
+			if resource.Persistence == nil {
+				resource.Persistence = &PersistenceV2{Persistent: true, SizeBytes: resourcev1.DefaultKafkaStorageBytes, PolicyRef: resourcev1.StoragePolicyDefault}
+			}
 		}
 		if resource.Persistence != nil {
 			if resource.Persistence.SizeBytes < 0 || (!resource.Persistence.Persistent && (resource.Persistence.SizeBytes != 0 || resource.Persistence.PolicyRef != "")) {

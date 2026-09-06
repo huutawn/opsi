@@ -168,7 +168,7 @@ func (r Runner) sendHeartbeat(ctx context.Context) {
 		NodeReady:    health.NodeReady,
 		K3SStatus:    health.K3SStatus,
 		Capacity:     health.Capacity,
-		Capabilities: map[string]any{"deploy": health.NodeReady && r.Engine != nil, "node_lifecycle": r.NodeLifecycle != nil, "managed_resources": health.NodeReady && r.ManagedResources != nil, "postgres_logical_backup": health.NodeReady && r.Backups != nil, "postgres_logical_restore": health.NodeReady && r.Restores != nil, "dep_verification": health.NodeReady && r.DepVerifier != nil},
+		Capabilities: map[string]any{"deploy": health.NodeReady && r.Engine != nil, "node_lifecycle": r.NodeLifecycle != nil, "managed_resources": health.NodeReady && r.ManagedResources != nil, "managed_kafka": health.NodeReady && r.ManagedResources != nil, "postgres_logical_backup": health.NodeReady && r.Backups != nil, "postgres_logical_restore": health.NodeReady && r.Restores != nil, "dep_verification": health.NodeReady && r.DepVerifier != nil},
 	})
 	if err != nil {
 		r.ConnectionState.SetConnected(false)

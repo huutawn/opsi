@@ -207,6 +207,8 @@ func (s Service) DeleteIntent(ctx context.Context, projectID, resourceID, actor 
 		if active {
 			return resourcev1.Resource{}, Error{Code: "RESOURCE_ACTIVE_OPERATION_CONFLICT", Status: 409, Message: "resource has an active backup"}
 		}
+	}
+	if current.Type == resourcev1.TypePostgres || current.Type == resourcev1.TypeKafka {
 		bindings, err := s.ListBindings(ctx, projectID, current.EnvironmentID)
 		if err != nil {
 			return resourcev1.Resource{}, err
@@ -275,8 +277,10 @@ func (s Service) CreateBinding(ctx context.Context, projectID, key string, reque
 	if logical == "" || len(logical) > 64 {
 		return resourcev1.Binding{}, false, invalid("RESOURCE_BINDING_NAME_INVALID", "binding logical name is required")
 	}
-	if target.Kind == resourcev1.KindManagedService && target.Type == resourcev1.TypePostgres && (target.Lifecycle == resourcev1.LifecycleDeleting || target.Runtime == nil || !factualReady(target.Runtime.Spec, target.Runtime.Evidence)) {
-		return resourcev1.Binding{}, false, invalid("RESOURCE_BINDING_TARGET_NOT_READY", "managed resource must be factually Ready before binding")
+	if target.Kind == resourcev1.KindManagedService {
+		if managedStorageRequired(target.Type) && (target.Lifecycle == resourcev1.LifecycleDeleting || target.Runtime == nil || !factualReady(target.Runtime.Spec, target.Runtime.Evidence)) {
+			return resourcev1.Binding{}, false, invalid("RESOURCE_BINDING_TARGET_NOT_READY", "managed resource must be factually Ready before binding")
+		}
 	}
 	if target.Kind == resourcev1.KindManagedService && target.Type == resourcev1.TypePostgres {
 		active, err := s.hasActiveOperation(ctx, projectID, target.ID)
@@ -420,7 +424,20 @@ func validateManaged(spec resourcev1.ManagedSpec) error {
 	if !definition.Storage.Supported && spec.Storage.Persistent {
 		return invalid("RESOURCE_STORAGE_UNSUPPORTED", "resource type does not support persistent storage")
 	}
-	if len(spec.ServiceConfig) != 0 {
+	if spec.Type == resourcev1.TypeKafka {
+		if err := resourcev1.ValidateKafkaServiceConfig(spec.ServiceConfig); err != nil {
+			return invalid("RESOURCE_CONFIG_INVALID", err.Error())
+		}
+		if spec.Storage.PolicyRef != "" && spec.Storage.PolicyRef != resourcev1.StoragePolicyDefault {
+			return invalid(resourcev1.FailureStorageInvalid, "managed Kafka storage policy is unsupported")
+		}
+		if spec.Version != "" && spec.Version != "default" && spec.Version != resourcev1.KafkaVersion {
+			return invalid(resourcev1.FailureVersionUpgradeUnsupported, "managed Kafka version changes are unsupported")
+		}
+		if spec.Replicas != 1 {
+			return invalid("MANAGED_RESOURCE_REPLICAS_INVALID", "managed Kafka replicas must be exactly 1 in single-node-experimental")
+		}
+	} else if len(spec.ServiceConfig) != 0 {
 		return invalid("RESOURCE_CONFIG_UNSUPPORTED", "resource type has no configurable service keys in P07A")
 	}
 	if spec.Type == resourcev1.TypePostgres {
@@ -431,7 +448,7 @@ func validateManaged(spec resourcev1.ManagedSpec) error {
 			return invalid(resourcev1.FailureVersionUpgradeUnsupported, "managed PostgreSQL version changes are unsupported")
 		}
 	}
-	if spec.Type == resourcev1.TypeRedis || spec.Type == resourcev1.TypePostgres {
+	if spec.Type == resourcev1.TypeRedis || spec.Type == resourcev1.TypePostgres || spec.Type == resourcev1.TypeKafka {
 		if spec.ConnectionPolicy.Mode != "none" && spec.ConnectionPolicy.Mode != "internal" {
 			return invalid("RESOURCE_EXPOSURE_INVALID", "managed resource connection policy must be none or internal")
 		}
@@ -460,19 +477,37 @@ func validateManaged(spec resourcev1.ManagedSpec) error {
 }
 
 func validateManagedUpdate(current resourcev1.Resource, next resourcev1.ManagedSpec) error {
-	if current.Runtime == nil || current.Type != resourcev1.TypePostgres {
+	if current.Runtime == nil {
 		return nil
 	}
-	version := strings.TrimSpace(next.Version)
-	if version != "" && version != "default" && version != current.Runtime.Spec.Version {
-		return invalid(resourcev1.FailureVersionUpgradeUnsupported, "managed PostgreSQL version changes are unsupported")
+	if current.Type == resourcev1.TypePostgres {
+		version := strings.TrimSpace(next.Version)
+		if version != "" && version != "default" && version != current.Runtime.Spec.Version {
+			return invalid(resourcev1.FailureVersionUpgradeUnsupported, "managed PostgreSQL version changes are unsupported")
+		}
+		policy := next.Storage.PolicyRef
+		if policy == "" {
+			policy = resourcev1.StoragePolicyDefault
+		}
+		if next.Storage.SizeBytes != current.Runtime.Spec.Storage.SizeBytes || policy != current.Runtime.Spec.Storage.PolicyRef {
+			return invalid(resourcev1.FailureStorageResizeUnsupported, "managed PostgreSQL storage resize or policy changes are unsupported")
+		}
 	}
-	policy := next.Storage.PolicyRef
-	if policy == "" {
-		policy = resourcev1.StoragePolicyDefault
-	}
-	if next.Storage.SizeBytes != current.Runtime.Spec.Storage.SizeBytes || policy != current.Runtime.Spec.Storage.PolicyRef {
-		return invalid(resourcev1.FailureStorageResizeUnsupported, "managed PostgreSQL storage resize or policy changes are unsupported")
+	if current.Type == resourcev1.TypeKafka {
+		version := strings.TrimSpace(next.Version)
+		if version != "" && version != "default" && version != current.Runtime.Spec.Version {
+			return invalid(resourcev1.FailureVersionUpgradeUnsupported, "managed Kafka version changes are unsupported")
+		}
+		if next.Replicas != current.Runtime.Spec.Replicas {
+			return invalid("MANAGED_RESOURCE_REPLICAS_UPDATE_UNSUPPORTED", "managed Kafka replica changes are unsupported")
+		}
+		policy := next.Storage.PolicyRef
+		if policy == "" {
+			policy = resourcev1.StoragePolicyDefault
+		}
+		if next.Storage.SizeBytes != current.Runtime.Spec.Storage.SizeBytes || policy != current.Runtime.Spec.Storage.PolicyRef {
+			return invalid(resourcev1.FailureStorageResizeUnsupported, "managed Kafka storage resize or policy changes are unsupported")
+		}
 	}
 	return nil
 }
@@ -554,7 +589,7 @@ func protocolCompatible(target resourcev1.Resource, protocol resourcev1.Protocol
 
 func knownProtocol(value resourcev1.Protocol) bool {
 	switch value {
-	case resourcev1.ProtocolPostgres, resourcev1.ProtocolRedis, resourcev1.ProtocolNATS, resourcev1.ProtocolAMQP, resourcev1.ProtocolMySQL, resourcev1.ProtocolHTTP, resourcev1.ProtocolTCP, resourcev1.ProtocolCustom:
+	case resourcev1.ProtocolPostgres, resourcev1.ProtocolRedis, resourcev1.ProtocolNATS, resourcev1.ProtocolKafka, resourcev1.ProtocolAMQP, resourcev1.ProtocolMySQL, resourcev1.ProtocolHTTP, resourcev1.ProtocolTCP, resourcev1.ProtocolCustom:
 		return true
 	}
 	return false

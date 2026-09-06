@@ -389,6 +389,13 @@ func ValidatePlan(plan Plan) error {
 		if resource.LogicalName == "" || resource.Type == "" || resources[resource.LogicalName] {
 			return errors.New("deployment plan resource intent is invalid")
 		}
+		acknowledgements := map[string]bool{}
+		for _, acknowledgement := range resource.Acknowledgements {
+			if acknowledgement != "kafka_single_node_experimental" || acknowledgements[acknowledgement] {
+				return errors.New("deployment plan resource acknowledgement is invalid")
+			}
+			acknowledgements[acknowledgement] = true
+		}
 		if resource.Managed {
 			resourceType := resourcev1.Type(resource.Type)
 			if resourceType == "valkey" {
@@ -397,6 +404,9 @@ func ValidatePlan(plan Plan) error {
 			definition, ok := resourcev1.Definition(resourceType)
 			if !ok || !definition.Provisioning.Implemented {
 				return errors.New("deployment plan managed resource type is unsupported")
+			}
+			if resourceType == resourcev1.TypeKafka && !acknowledgements["kafka_single_node_experimental"] {
+				return errors.New("managed Kafka single-node experimental risk acknowledgement is required")
 			}
 			persistence := resource.Persistence
 			if definition.Storage.Required && (persistence == nil || !persistence.Persistent) {
@@ -409,8 +419,8 @@ func ValidatePlan(plan Plan) error {
 				if persistence.Persistent && !definition.Storage.Supported {
 					return errors.New("deployment plan managed resource storage is unsupported")
 				}
-				if resourceType == resourcev1.TypePostgres && persistence.PolicyRef != resourcev1.StoragePolicyDefault {
-					return errors.New("deployment plan managed PostgreSQL storage policy is invalid")
+				if definition.Storage.Required && persistence.PolicyRef != resourcev1.StoragePolicyDefault {
+					return errors.New("deployment plan managed resource storage policy is invalid")
 				}
 			}
 		}
@@ -423,7 +433,7 @@ func ValidatePlan(plan Plan) error {
 		if dependency.Protocol != serviceconfigurationv1.ProtocolHTTP && !resourcecompiler.ValidManagedProtocol(dependency.Protocol) {
 			return errors.New("deployment plan managed dependency protocol is unsupported")
 		}
-		if dependency.Required && dependency.Protocol != "postgres" && dependency.Protocol != "redis" && dependency.Protocol != "nats" && dependency.Verification == nil {
+		if dependency.Required && dependency.Protocol != "postgres" && dependency.Protocol != "redis" && dependency.Protocol != "nats" && dependency.Protocol != "kafka" && dependency.Verification == nil {
 			return errors.New("required dependency verification contract is missing")
 		}
 		if len(dependency.ProxyPaths) > 0 {

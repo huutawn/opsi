@@ -1,4 +1,4 @@
-export type ConnectionProtocol = "postgres" | "redis" | "nats" | "http";
+export type ConnectionProtocol = "postgres" | "redis" | "nats" | "kafka" | "http";
 export type MappingValue = { environment_name: string; symbolic_source: string; template?: string };
 
 type Sensitivity = "secret" | "non-secret" | "template";
@@ -14,7 +14,7 @@ const atomic = {
   template: { source: "connection.template", label: "Safe template", sensitivity: "template" },
 } satisfies Record<string, SourceDescriptor>;
 
-export const connectionProtocols: ConnectionProtocol[] = ["postgres", "redis", "nats", "http"];
+export const connectionProtocols: ConnectionProtocol[] = ["postgres", "redis", "nats", "kafka", "http"];
 
 export const connectionCatalog: Record<Exclude<ConnectionProtocol, "http">, ProtocolDescriptor> = {
   postgres: { credentialTemplates: true, sources: [
@@ -32,6 +32,12 @@ export const connectionCatalog: Record<Exclude<ConnectionProtocol, "http">, Prot
   nats: { credentialTemplates: false, sources: [
     { source: "connection.nats.uri", label: "NATS URI", sensitivity: "non-secret", example: "nats://resource.internal:4222" },
     atomic.host, atomic.port, atomic.template,
+  ] },
+  kafka: { credentialTemplates: true, sources: [
+    { source: "connection.kafka.bootstrap_servers", label: "Bootstrap servers", sensitivity: "non-secret" },
+    { source: "connection.kafka.security_protocol", label: "Security protocol", sensitivity: "non-secret" },
+    { source: "connection.kafka.sasl_mechanism", label: "SASL mechanism", sensitivity: "non-secret" },
+    atomic.username, atomic.password, atomic.host, atomic.port, atomic.template,
   ] },
 };
 
@@ -141,7 +147,7 @@ export function mappingPreview(protocol: string, mapping: MappingValue): string 
   const descriptor = sourceOptions(protocol).find((item) => item.source === mapping.symbolic_source);
   if (descriptor?.example) return descriptor.example;
   if (mapping.symbolic_source === "resource.host") return "resource.internal";
-  if (mapping.symbolic_source === "resource.port") return protocol === "nats" ? "4222" : protocol === "redis" ? "6379" : "5432";
+  if (mapping.symbolic_source === "resource.port") return protocol === "nats" ? "4222" : protocol === "redis" ? "6379" : protocol === "kafka" ? "9092" : "5432";
   if (mapping.symbolic_source === "credential.database") return protocol === "redis" ? "0" : "app";
   return mapping.symbolic_source === "connection.template" ? "Template output (credentials redacted)" : "Resolved at deploy time";
 }

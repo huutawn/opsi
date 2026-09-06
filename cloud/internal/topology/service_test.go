@@ -98,6 +98,39 @@ func TestUnknownCapacityOverrideIsScopedToPolicyAssignments(t *testing.T) {
 	}
 }
 
+func TestKafkaPlacementRequiresExplicitAgentCapability(t *testing.T) {
+	now := time.Now().UTC()
+	facts := Facts{
+		ProjectID:    "p1",
+		Environments: []EnvironmentFact{{ID: "e1", ProjectID: "p1", Status: "active"}},
+		Runtimes:     []RuntimeFact{{ID: "r1", ProjectID: "p1", EnvironmentID: "e1", Type: "k3s", Status: "ready"}},
+		Resources:    []ResourceIdentity{{ID: "kafka-1", ProjectID: "p1", EnvironmentID: "e1", Kind: "managed_service", Type: "kafka"}},
+		Nodes:        []NodeFact{{ID: "n1", ProjectID: "p1", RuntimeID: "r1", Status: "healthy", CPUCores: 4, MemoryMB: 8192, LastSeenAt: &now}},
+		Agents:       []AgentFact{{ID: "a1", ProjectID: "p1", RuntimeID: "r1", NodeID: "n1", Status: "active", Capabilities: map[string]any{"deploy": true, "managed_resources": true}, LastSeenAt: &now}},
+	}
+	draft := topologyv1.Draft{SchemaVersion: topologyv1.SchemaVersion, ProjectID: "p1", Assignments: []topologyv1.Assignment{{ServiceKey: "kafka-1", EnvironmentID: "e1", RuntimeID: "r1", Replicas: 1, CPURequestMillicores: 500, MemoryRequestBytes: 1 << 30, Exposure: topologyv1.ExposureIntent{Mode: "none"}}}}
+	service := Service{Store: NewMemoryStore(), Facts: factFixture{facts}, Now: func() time.Time { return now }}
+	result, err := service.Validate(context.Background(), "p1", draft, false)
+	if err != nil || result.Valid || !hasIssue(result.Issues, "TOPOLOGY_AGENT_CAPABILITY_MISSING") {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	facts.Agents[0].Capabilities["managed_kafka"] = true
+	service.Facts = factFixture{facts}
+	result, err = service.Validate(context.Background(), "p1", draft, false)
+	if err != nil || !result.Valid {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func hasIssue(issues []topologyv1.Issue, code string) bool {
+	for _, issue := range issues {
+		if issue.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
 func TestApplyIdempotencyConflictAndConcurrentRevision(t *testing.T) {
 	now := time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC)
 	fresh := now

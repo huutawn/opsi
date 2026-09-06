@@ -58,7 +58,7 @@ export type ServiceRecord = {
 
 export type RepositoryEvidence = { path: string; kind: string; reason: string; confidence: "high" | "medium" | "low" };
 export type DetectedApplication = { source_key: string; key: string; name: string; root: string; port?: number; environment?: Record<string,string>; capacity?: { replicas?: number; cpu_milli?: number; memory_bytes?: number; cpu_limit_milli?: number; memory_limit_bytes?: number }; exposure?: { mode?: string; hostname?: string; path?: string; automatic?: boolean }; build: { context: string; dockerfile_path?: string; strategy: string; platform: string; image?: string }; confidence: string; reason: string; evidence: RepositoryEvidence[] };
-export type DetectedResource = { logical_name: string; type: string; managed: boolean; required: boolean; persistence?: { persistent: boolean; size_bytes?: number; policy_ref?: string }; settings?: Record<string,string>; recommendation?: string; confidence: string; reason: string; evidence: RepositoryEvidence[] };
+export type DetectedResource = { logical_name: string; type: string; managed: boolean; required: boolean; persistence?: { persistent: boolean; size_bytes?: number; policy_ref?: string }; settings?: Record<string,string>; acknowledgements?: string[]; recommendation?: string; confidence: string; reason: string; evidence: RepositoryEvidence[] };
 export type DependencyVerification = { type: string; path?: string; expected_status?: number };
 export type DetectedDependency = { from: string; to: string; protocol: string; strategy?: string; path?: string; required: boolean; injections?: Array<{ environment_name: string; symbolic_source: string; template?: string }>; verification?: DependencyVerification; confidence: string; reason: string; evidence: RepositoryEvidence[] };
 export type DetectedBinding = { from: string; to: string; kind: string; path?: string; confidence: string; reason: string; evidence: RepositoryEvidence[] };
@@ -1165,6 +1165,21 @@ export type UpdateResourceRequest = {
   external?: Record<string, unknown>;
 };
 
+export type ConfigPropertyMetadata = {
+  name: string;
+  type: "int" | "string" | "bool";
+  default: string;
+  description?: string;
+  min?: number;
+  max?: number;
+};
+
+export type ProfileResourceDefaults = {
+  cpu_millicores: number;
+  memory_bytes: number;
+  storage_bytes: number;
+};
+
 export type ResourceTypeDefinition = {
   type: string;
   display_name: string;
@@ -1177,7 +1192,15 @@ export type ResourceTypeDefinition = {
   credential_keys: string[];
   generated_values: Array<{ name: string; sensitivity: "non_secret" | "secret" }>;
   storage: { supported: boolean; required: boolean };
-  provisioning: { implemented: boolean; profiles: Array<{ name: string; versions: Array<{ version: string; image: string }> }> };
+  provisioning: {
+    implemented: boolean;
+    profiles: Array<{
+      name: string;
+      resource_defaults?: ProfileResourceDefaults;
+      config_metadata?: ConfigPropertyMetadata[];
+      versions: Array<{ version: string; image: string }>;
+    }>;
+  };
 };
 
 export type ResourceBinding = {

@@ -58,6 +58,13 @@ var sourceCatalog = map[string]SourceDescriptor{
 	"nats\x00" + serviceconfigurationv1.SourceResourceHost:           descriptor("nats", serviceconfigurationv1.SourceResourceHost, resourcev1.ValueNonSecret, factCompiler("host"), "host"),
 	"nats\x00" + serviceconfigurationv1.SourceResourcePort:           descriptor("nats", serviceconfigurationv1.SourceResourcePort, resourcev1.ValueNonSecret, factCompiler("port"), "port"),
 	"nats\x00" + serviceconfigurationv1.SourceNATSURI:                descriptor("nats", serviceconfigurationv1.SourceNATSURI, resourcev1.ValueNonSecret, compileNATSURI, "host", "port"),
+	"kafka\x00" + serviceconfigurationv1.SourceResourceHost:          descriptor("kafka", serviceconfigurationv1.SourceResourceHost, resourcev1.ValueNonSecret, factCompiler("host"), "host"),
+	"kafka\x00" + serviceconfigurationv1.SourceResourcePort:          descriptor("kafka", serviceconfigurationv1.SourceResourcePort, resourcev1.ValueNonSecret, factCompiler("port"), "port"),
+	"kafka\x00" + serviceconfigurationv1.SourceCredentialUsername:    descriptor("kafka", serviceconfigurationv1.SourceCredentialUsername, resourcev1.ValueSecret, factCompiler("username"), "credential"),
+	"kafka\x00" + serviceconfigurationv1.SourceCredentialPassword:    descriptor("kafka", serviceconfigurationv1.SourceCredentialPassword, resourcev1.ValueSecret, factCompiler("password"), "credential"),
+	"kafka\x00" + serviceconfigurationv1.SourceKafkaBootstrapServers: descriptor("kafka", serviceconfigurationv1.SourceKafkaBootstrapServers, resourcev1.ValueNonSecret, compileKafkaBootstrapServers, "host", "port"),
+	"kafka\x00" + serviceconfigurationv1.SourceKafkaSecurityProtocol: descriptor("kafka", serviceconfigurationv1.SourceKafkaSecurityProtocol, resourcev1.ValueNonSecret, compileConstant("SASL_PLAINTEXT")),
+	"kafka\x00" + serviceconfigurationv1.SourceKafkaSASLMechanism:    descriptor("kafka", serviceconfigurationv1.SourceKafkaSASLMechanism, resourcev1.ValueNonSecret, compileConstant("PLAIN")),
 }
 
 var applicationSources = map[string]map[string]bool{
@@ -115,7 +122,7 @@ func LookupSource(protocol, source, template string) (SourceDescriptor, error) {
 
 func ValidManagedProtocol(protocol string) bool {
 	switch strings.TrimSpace(protocol) {
-	case serviceconfigurationv1.ProtocolPostgres, serviceconfigurationv1.ProtocolRedis, serviceconfigurationv1.ProtocolNATS:
+	case serviceconfigurationv1.ProtocolPostgres, serviceconfigurationv1.ProtocolRedis, serviceconfigurationv1.ProtocolNATS, serviceconfigurationv1.ProtocolKafka:
 		return true
 	default:
 		return false
@@ -303,5 +310,15 @@ func legacyURIForProtocol(protocol string) string {
 		return serviceconfigurationv1.SourceNATSURI
 	default:
 		return ""
+	}
+}
+
+func compileKafkaBootstrapServers(facts ConnectionFacts) (string, error) {
+	return hostPort(facts.Host, facts.Port), nil
+}
+
+func compileConstant(val string) sourceCompiler {
+	return func(ConnectionFacts) (string, error) {
+		return val, nil
 	}
 }

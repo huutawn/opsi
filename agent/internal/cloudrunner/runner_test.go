@@ -580,12 +580,15 @@ func TestHeartbeatHealthAndCapabilitiesFailClosed(t *testing.T) {
 		probe         HealthProbe
 		engine        DeployEngine
 		lifecycle     NodeLifecycleExecutor
+		managed       ManagedResourceReconciler
 		wantStatus    string
 		wantReady     bool
 		wantDeploy    bool
 		wantLifecycle bool
+		wantManaged   bool
 	}{
 		{name: "ready", probe: staticHealthProbe{NodeReady: true, K3SStatus: K3SStatusReady}, engine: &fakeRolloutEngine{}, wantStatus: K3SStatusReady, wantReady: true, wantDeploy: true},
+		{name: "managed Kafka ready", probe: staticHealthProbe{NodeReady: true, K3SStatus: K3SStatusReady}, engine: &fakeRolloutEngine{}, managed: fakeManagedResources{}, wantStatus: K3SStatusReady, wantReady: true, wantDeploy: true, wantManaged: true},
 		{name: "unavailable", probe: staticHealthProbe{K3SStatus: K3SStatusUnavailable}, engine: &fakeRolloutEngine{}, wantStatus: K3SStatusUnavailable},
 		{name: "not ready", probe: staticHealthProbe{K3SStatus: K3SStatusNotReady}, engine: &fakeRolloutEngine{}, wantStatus: K3SStatusNotReady},
 		{name: "missing probe", engine: &fakeRolloutEngine{}, wantStatus: K3SStatusUnavailable},
@@ -594,8 +597,8 @@ func TestHeartbeatHealthAndCapabilitiesFailClosed(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &fakeClient{}
-			Runner{Client: client, Engine: tt.engine, NodeLifecycle: tt.lifecycle, HealthProbe: tt.probe}.sendHeartbeat(context.Background())
-			if client.heartbeat.NodeReady != tt.wantReady || client.heartbeat.K3SStatus != tt.wantStatus || client.heartbeat.Capabilities["deploy"] != tt.wantDeploy || client.heartbeat.Capabilities["node_lifecycle"] != tt.wantLifecycle {
+			Runner{Client: client, Engine: tt.engine, NodeLifecycle: tt.lifecycle, ManagedResources: tt.managed, HealthProbe: tt.probe}.sendHeartbeat(context.Background())
+			if client.heartbeat.NodeReady != tt.wantReady || client.heartbeat.K3SStatus != tt.wantStatus || client.heartbeat.Capabilities["deploy"] != tt.wantDeploy || client.heartbeat.Capabilities["node_lifecycle"] != tt.wantLifecycle || client.heartbeat.Capabilities["managed_resources"] != tt.wantManaged || client.heartbeat.Capabilities["managed_kafka"] != tt.wantManaged {
 				t.Fatalf("heartbeat = %+v", client.heartbeat)
 			}
 		})

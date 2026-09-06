@@ -75,7 +75,7 @@ export type ServerRuntimeSummary = {
 export type ResourceRuntimeSummary = {
   id: string;
   name: string;
-  type: "postgres" | "valkey" | "nats" | string;
+  type: "postgres" | "valkey" | "nats" | "kafka" | string;
   typeLabel: string;
   version?: string;
   status: ResourceRuntimeStatus;
@@ -88,6 +88,10 @@ export type ResourceRuntimeSummary = {
   allocatedMemoryBytes?: number;
   storageBytes?: number;
   persistentStorage: boolean;
+  brokerReady?: boolean;
+  authReady?: boolean;
+  pvcName?: string;
+  pvcUID?: string;
   createdAt?: string;
   updatedAt?: string;
   lastOperation?: string;
@@ -201,6 +205,8 @@ export function formatResourceTypeLabel(type: string): string {
       return "Valkey";
     case "nats":
       return "NATS";
+    case "kafka":
+      return "Kafka";
     default:
       return type.toUpperCase();
   }
@@ -546,6 +552,11 @@ export function deriveResourceRuntimeSummaries(inputs: {
     const storageBytes = res.runtime?.spec?.storage?.size_bytes || rawRes.storage_bytes;
     const persistentStorage = res.runtime?.spec?.storage?.persistent ?? rawRes.persistent ?? true;
     const lastFailure = res.runtime?.failure_message || rawRes.last_failure;
+    const evidence = res.runtime?.evidence;
+    const brokerReady = Boolean(evidence?.workload_ready && evidence?.pod_ready && evidence?.service_ready);
+    const authReady = Boolean(evidence?.auth_ready);
+    const pvcName = evidence?.pvc_name;
+    const pvcUID = evidence?.pvc_uid;
 
     return {
       id: res.id,
@@ -563,6 +574,10 @@ export function deriveResourceRuntimeSummaries(inputs: {
       allocatedMemoryBytes,
       storageBytes,
       persistentStorage,
+      brokerReady,
+      authReady,
+      pvcName,
+      pvcUID,
       createdAt: res.created_at,
       updatedAt: res.updated_at,
       lastOperation: rawRes.last_operation,

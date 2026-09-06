@@ -67,16 +67,17 @@ type Persistence struct {
 }
 
 type Resource struct {
-	LogicalName    string            `json:"logical_name"`
-	Type           string            `json:"type"`
-	Managed        bool              `json:"managed"`
-	Required       bool              `json:"required"`
-	Persistence    *Persistence      `json:"persistence,omitempty"`
-	Settings       map[string]string `json:"settings,omitempty"`
-	Recommendation string            `json:"recommendation,omitempty"`
-	Confidence     Confidence        `json:"confidence"`
-	Reason         string            `json:"reason"`
-	Evidence       []Evidence        `json:"evidence"`
+	LogicalName      string            `json:"logical_name"`
+	Type             string            `json:"type"`
+	Managed          bool              `json:"managed"`
+	Required         bool              `json:"required"`
+	Persistence      *Persistence      `json:"persistence,omitempty"`
+	Settings         map[string]string `json:"settings,omitempty"`
+	Acknowledgements []string          `json:"acknowledgements,omitempty"`
+	Recommendation   string            `json:"recommendation,omitempty"`
+	Confidence       Confidence        `json:"confidence"`
+	Reason           string            `json:"reason"`
+	Evidence         []Evidence        `json:"evidence"`
 }
 
 type Injection struct {

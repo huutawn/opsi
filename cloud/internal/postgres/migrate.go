@@ -654,5 +654,8 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := MigratePublicHostnameAllocations(ctx, db); err != nil {
 		return err
 	}
-	return MigrateSSHHostKeyTrust(ctx, db)
+	if err := MigrateSSHHostKeyTrust(ctx, db); err != nil {
+		return err
+	}
+	return MigrateManagedKafka(ctx, db)
 }

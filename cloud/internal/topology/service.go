@@ -237,8 +237,22 @@ func validate(ctx context.Context, s Service, facts Facts, current topologyv1.Pl
 		if _, ok := services[assignment.ServiceKey]; !ok && !resourceOK {
 			addIssue(&result, "TOPOLOGY_SERVICE_NOT_FOUND", "service is not active in this project", assignment.ServiceKey, assignment.RuntimeID)
 		}
-		if resourceOK && (resource.Kind != "managed_service" || resource.EnvironmentID != assignment.EnvironmentID || resource.ProjectID != draft.ProjectID) {
-			addIssue(&result, "MANAGED_RESOURCE_ASSIGNMENT_INVALID", "managed resource assignment does not match its canonical scope", assignment.ServiceKey, assignment.RuntimeID)
+		if resourceOK {
+			if resource.Kind != "managed_service" || resource.EnvironmentID != assignment.EnvironmentID || resource.ProjectID != draft.ProjectID {
+				addIssue(&result, "MANAGED_RESOURCE_ASSIGNMENT_INVALID", "managed resource assignment does not match its canonical scope", assignment.ServiceKey, assignment.RuntimeID)
+			}
+			if resource.Type == "kafka" {
+				hasManagedKafka := false
+				for _, agent := range facts.Agents {
+					if agent.ProjectID == draft.ProjectID && agent.RuntimeID == assignment.RuntimeID && agent.Status == "active" && capabilityEnabled(agent.Capabilities, "managed_resources") && capabilityEnabled(agent.Capabilities, "managed_kafka") {
+						hasManagedKafka = true
+						break
+					}
+				}
+				if !hasManagedKafka {
+					addIssue(&result, "TOPOLOGY_AGENT_CAPABILITY_MISSING", "Agent requires upgrade: managed_kafka capability is required for managed Kafka. Next action: upgrade the Agent.", assignment.ServiceKey, assignment.RuntimeID)
+				}
+			}
 		}
 		runtime, ok := runtimes[assignment.RuntimeID]
 		if !ok || runtime.ProjectID != draft.ProjectID {

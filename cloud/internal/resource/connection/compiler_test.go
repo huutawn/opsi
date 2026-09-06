@@ -185,7 +185,7 @@ func TestCompileErrorCodesAreStableAndDoNotExposeFacts(t *testing.T) {
 		want string
 		err  error
 	}{
-		"protocol":           {ErrorUnsupportedProtocol, compileErrorFrom("kafka", serviceconfigurationv1.SourceConnectionTemplate, "password="+secretFact, ConnectionFacts{})},
+		"protocol":           {ErrorUnsupportedProtocol, compileErrorFrom("cassandra", serviceconfigurationv1.SourceConnectionTemplate, "password="+secretFact, ConnectionFacts{})},
 		"source":             {ErrorUnsupportedSource, compileErrorFrom("postgres", serviceconfigurationv1.SourceRedisURI, "", ConnectionFacts{})},
 		"template":           {ErrorInvalidTemplate, compileErrorFrom("postgres", serviceconfigurationv1.SourceConnectionTemplate, "password="+secretFact, ConnectionFacts{})},
 		"fact":               {ErrorInvalidFact, compileErrorFrom("nats", serviceconfigurationv1.SourceNATSURI, "", ConnectionFacts{Host: secretFact + "@", Port: "4222"})},
@@ -322,3 +322,38 @@ func (errUnclosedQuote) Error() string { return "unclosed quote" }
 type errMissingEquals struct{}
 
 func (errMissingEquals) Error() string { return "missing equals" }
+
+func TestKafkaConnectionCompilation(t *testing.T) {
+	facts := ConnectionFacts{
+		Host:                "kafka.internal",
+		Port:                "9092",
+		Username:            "opsi",
+		Password:            "secret-password",
+		CredentialAvailable: true,
+	}
+	bootstrap, err := CompileConnection("kafka", serviceconfigurationv1.SourceKafkaBootstrapServers, "", facts)
+	if err != nil || bootstrap.Value != "kafka.internal:9092" || bootstrap.Sensitivity != resourcev1.ValueNonSecret {
+		t.Fatalf("bootstrap=%+v err=%v", bootstrap, err)
+	}
+	secProto, err := CompileConnection("kafka", serviceconfigurationv1.SourceKafkaSecurityProtocol, "", facts)
+	if err != nil || secProto.Value != "SASL_PLAINTEXT" || secProto.Sensitivity != resourcev1.ValueNonSecret {
+		t.Fatalf("secProto=%+v err=%v", secProto, err)
+	}
+	saslMech, err := CompileConnection("kafka", serviceconfigurationv1.SourceKafkaSASLMechanism, "", facts)
+	if err != nil || saslMech.Value != "PLAIN" || saslMech.Sensitivity != resourcev1.ValueNonSecret {
+		t.Fatalf("saslMech=%+v err=%v", saslMech, err)
+	}
+	user, err := CompileConnection("kafka", serviceconfigurationv1.SourceCredentialUsername, "", facts)
+	if err != nil || user.Value != "opsi" || user.Sensitivity != resourcev1.ValueSecret {
+		t.Fatalf("user=%+v err=%v", user, err)
+	}
+	pass, err := CompileConnection("kafka", serviceconfigurationv1.SourceCredentialPassword, "", facts)
+	if err != nil || pass.Value != "secret-password" || pass.Sensitivity != resourcev1.ValueSecret {
+		t.Fatalf("pass=%+v err=%v", pass, err)
+	}
+
+	preset := serviceconfigurationv1.KafkaStandardPreset("kafka", "res-kafka-1", true)
+	if len(preset.InjectionMappings) != 5 {
+		t.Fatalf("preset mappings=%+v", preset.InjectionMappings)
+	}
+}

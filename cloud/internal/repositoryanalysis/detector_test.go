@@ -123,8 +123,10 @@ func TestComposeIdentityServiceInference(t *testing.T) {
 		foundJWT = foundJWT || secret.Name == "jwt-signing-key" && secret.ApplicationKey == "identity-api" && secret.EnvironmentName == "Jwt__SigningKey" && secret.Display == "Generated and securely stored" && secret.SecretRef == "generated://jwt-signing-key"
 	}
 	kafkaDisabled := false
-	for _, issue := range result.Issues {
-		kafkaDisabled = kafkaDisabled || issue.Code == "KAFKA_UNSUPPORTED" && !issue.Blocking && issue.Resolution == "Kafka__Enabled=false"
+	for _, resource := range result.Resources {
+		if resource.Type == "kafka" && !resource.Managed && !resource.Required && resource.Recommendation == "Detected but disabled by Kafka__Enabled=false" {
+			kafkaDisabled = true
+		}
 	}
 	if !foundPostgres || !foundValkeyResource || !foundDB || !foundValkey || !foundAPI || !foundHub || !foundJWT || !kafkaDisabled {
 		t.Fatalf("dependencies=%+v secrets=%+v", result.Dependencies, result.Secrets)
@@ -215,7 +217,7 @@ func TestAcceptanceProfileExcludesLowSignalSourceAndReadsRootDocs(t *testing.T) 
 	if proxyDependencies != 1 {
 		t.Fatalf("proxy dependencies=%d all=%+v", proxyDependencies, result.Dependencies)
 	}
-	kafkaResources, kafkaIssues := 0, 0
+	kafkaResources := 0
 	for _, resource := range result.Resources {
 		if resource.Type == "kafka" {
 			kafkaResources++
@@ -226,16 +228,13 @@ func TestAcceptanceProfileExcludesLowSignalSourceAndReadsRootDocs(t *testing.T) 
 	}
 	for _, issue := range result.Issues {
 		if issue.Code == "KAFKA_UNSUPPORTED" {
-			kafkaIssues++
-			if issue.Blocking || issue.Resolution != "Kafka__Enabled=false" {
-				t.Fatalf("kafka issue=%+v", issue)
-			}
+			t.Fatalf("unexpected KAFKA_UNSUPPORTED issue=%+v", issue)
 		}
 		if issue.Code == "ANALYSIS_TRUNCATED" {
 			t.Fatalf("unexpected truncation issue=%+v", issue)
 		}
 	}
-	if kafkaResources != 1 || kafkaIssues != 1 {
+	if kafkaResources != 1 {
 		t.Fatalf("resources=%+v issues=%+v", result.Resources, result.Issues)
 	}
 }
@@ -364,7 +363,7 @@ func TestKafkaInitMergesIntoDisabledKafkaEvidence(t *testing.T) {
 `,
 		"api/Dockerfile": "FROM scratch\nEXPOSE 8080\n",
 	})
-	kafkaResources, kafkaIssues := 0, 0
+	kafkaResources := 0
 	for _, resource := range result.Resources {
 		if resource.Type == "kafka" {
 			kafkaResources++
@@ -375,13 +374,10 @@ func TestKafkaInitMergesIntoDisabledKafkaEvidence(t *testing.T) {
 	}
 	for _, issue := range result.Issues {
 		if issue.Code == "KAFKA_UNSUPPORTED" {
-			kafkaIssues++
-			if issue.Blocking || issue.Resolution != "Kafka__Enabled=false" {
-				t.Fatalf("kafka issue=%+v", issue)
-			}
+			t.Fatalf("unexpected KAFKA_UNSUPPORTED issue: %+v", issue)
 		}
 	}
-	if kafkaResources != 1 || kafkaIssues != 1 {
+	if kafkaResources != 1 {
 		t.Fatalf("resources=%+v issues=%+v", result.Resources, result.Issues)
 	}
 	for _, dependency := range result.Dependencies {
@@ -521,5 +517,108 @@ func TestOversizedExplicitConfigBlocksWithoutFallingBack(t *testing.T) {
 	}
 	if !issueCodes["EXPLICIT_CONFIG_UNREADABLE"] || !issueCodes["ANALYSIS_TRUNCATED"] {
 		t.Fatalf("issues=%+v", result.Issues)
+	}
+}
+
+func TestKafkaEnabledDetectedAsManagedAndRequiredWithAllowlistSettings(t *testing.T) {
+	result := analyze(t, memoryRepository{
+		"compose.yaml": `services:
+  api:
+    build: {context: api, dockerfile: Dockerfile}
+    depends_on: [kafka]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      KAFKA_SECURITY_PROTOCOL: "SASL_PLAINTEXT"
+      KAFKA_SASL_MECHANISM: "PLAIN"
+      KAFKA_SASL_USERNAME: "opsi"
+      KAFKA_SASL_PASSWORD: "secret-password"
+  kafka:
+    image: apache/kafka:4.3.1
+    environment:
+      KAFKA_NUM_PARTITIONS: "5"
+      KAFKA_LOG_RETENTION_HOURS: "336"
+      KAFKA_ARBITRARY_SECRET: "must-not-copy"
+`,
+		"api/Dockerfile": "FROM scratch\nEXPOSE 8080\n",
+	})
+
+	var kafkaRes *Resource
+	for i := range result.Resources {
+		if result.Resources[i].Type == "kafka" {
+			kafkaRes = &result.Resources[i]
+			break
+		}
+	}
+	if kafkaRes == nil {
+		t.Fatal("kafka resource was not detected")
+	}
+	if !kafkaRes.Managed || !kafkaRes.Required {
+		t.Fatalf("kafka expected managed & required: %+v", kafkaRes)
+	}
+	if kafkaRes.Persistence == nil || !kafkaRes.Persistence.Persistent || kafkaRes.Persistence.SizeBytes != resourcev1.DefaultKafkaStorageBytes || kafkaRes.Persistence.PolicyRef != resourcev1.StoragePolicyDefault {
+		t.Fatalf("kafka persistence mismatch: %+v", kafkaRes.Persistence)
+	}
+	if kafkaRes.Settings["num_partitions"] != "5" || kafkaRes.Settings["retention_hours"] != "336" {
+		t.Fatalf("kafka settings allowlist mismatch: %+v", kafkaRes.Settings)
+	}
+	if _, exists := kafkaRes.Settings["KAFKA_ARBITRARY_SECRET"]; exists {
+		t.Fatal("arbitrary config copied from compose")
+	}
+	for _, issue := range result.Issues {
+		if issue.Code == "KAFKA_UNSUPPORTED" {
+			t.Fatalf("unexpected KAFKA_UNSUPPORTED issue: %+v", issue)
+		}
+	}
+
+	// Dependency checks
+	if len(result.Dependencies) != 1 {
+		t.Fatalf("dependencies count=%d", len(result.Dependencies))
+	}
+	dep := result.Dependencies[0]
+	if dep.Protocol != "kafka" || dep.To != "kafka" || !dep.Required {
+		t.Fatalf("kafka dependency expected required: %+v", dep)
+	}
+	if len(dep.Injections) != 5 {
+		t.Fatalf("expected 5 Kafka injections, got: %+v", dep.Injections)
+	}
+}
+
+func TestKafkaDotNetAndSpringDialectDetection(t *testing.T) {
+	result := analyze(t, memoryRepository{
+		"compose.yaml": `services:
+  dotnet-app:
+    build: {context: dotnet, dockerfile: Dockerfile}
+    depends_on: [kafka]
+    environment:
+      Kafka__BootstrapServers: "kafka:9092"
+      Kafka__SecurityProtocol: "SASL_PLAINTEXT"
+      Kafka__SaslMechanism: "PLAIN"
+      Kafka__SaslUsername: "opsi"
+      Kafka__SaslPassword: "pass"
+  spring-app:
+    build: {context: spring, dockerfile: Dockerfile}
+    depends_on: [kafka]
+    environment:
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      SPRING_KAFKA_SECURITY_PROTOCOL: "SASL_PLAINTEXT"
+      SPRING_KAFKA_PROPERTIES_SASL_MECHANISM: "PLAIN"
+  kafka:
+    image: apache/kafka:4.3.1
+`,
+		"dotnet/Dockerfile": "FROM scratch\nEXPOSE 5000\n",
+		"spring/Dockerfile": "FROM scratch\nEXPOSE 8080\n",
+	})
+
+	for _, dep := range result.Dependencies {
+		if dep.From == "dotnet-app" {
+			if len(dep.Injections) != 5 {
+				t.Fatalf("dotnet injections count=%d: %+v", len(dep.Injections), dep.Injections)
+			}
+		}
+		if dep.From == "spring-app" {
+			if len(dep.Injections) != 3 {
+				t.Fatalf("spring injections count=%d: %+v", len(dep.Injections), dep.Injections)
+			}
+		}
 	}
 }

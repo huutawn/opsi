@@ -195,6 +195,22 @@ func setupMockCloudServer(t *testing.T) (*httptest.Server, string) {
 						MemoryBytes:   1024 * 1024 * 1024,
 					},
 				},
+				{
+					ID:            "res-kafka-1",
+					ProjectID:     projectID,
+					EnvironmentID: "production",
+					Name:          "kafka-main",
+					Kind:          resourcev1.KindManagedService,
+					Type:          resourcev1.TypeKafka,
+					Lifecycle:     resourcev1.LifecycleReady,
+					Managed: &resourcev1.ManagedSpec{
+						Type:          resourcev1.TypeKafka,
+						Version:       resourcev1.KafkaVersion,
+						Replicas:      1,
+						CPUMillicores: 500,
+						MemoryBytes:   1024 * 1024 * 1024,
+					},
+				},
 			},
 		})
 	})
@@ -215,6 +231,25 @@ func setupMockCloudServer(t *testing.T) (*httptest.Server, string) {
 				Version:       "16",
 				Replicas:      1,
 				CPUMillicores: 1000,
+				MemoryBytes:   1024 * 1024 * 1024,
+			},
+		})
+	})
+	mux.HandleFunc(fmt.Sprintf("/api/projects/%s/resources/res-kafka-1", projectID), func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resourcev1.Resource{
+			ID:            "res-kafka-1",
+			ProjectID:     projectID,
+			EnvironmentID: "production",
+			Name:          "kafka-main",
+			Kind:          resourcev1.KindManagedService,
+			Type:          resourcev1.TypeKafka,
+			Lifecycle:     resourcev1.LifecycleReady,
+			Managed: &resourcev1.ManagedSpec{
+				Type:          resourcev1.TypeKafka,
+				Version:       resourcev1.KafkaVersion,
+				Replicas:      1,
+				CPUMillicores: 500,
 				MemoryBytes:   1024 * 1024 * 1024,
 			},
 		})
@@ -526,8 +561,14 @@ func TestMCPTools_AllReadToolsAcceptance(t *testing.T) {
 
 	// 6. managed_resources_list
 	res = callTool("managed_resources_list", map[string]any{"project_id": projectID})
-	if res.IsError || !strings.Contains(res.Content[0].Text, "postgres-main") {
+	if res.IsError || !strings.Contains(res.Content[0].Text, "postgres-main") || !strings.Contains(res.Content[0].Text, "kafka-main") {
 		t.Fatalf("managed_resources_list failed: %s", res.Content[0].Text)
+	}
+
+	// 6b. managed_resource_get kafka
+	res = callTool("managed_resource_get", map[string]any{"project_id": projectID, "resource_id": "res-kafka-1"})
+	if res.IsError || !strings.Contains(res.Content[0].Text, "kafka-main") {
+		t.Fatalf("managed_resource_get kafka failed: %s", res.Content[0].Text)
 	}
 
 	// 7. managed_resource_get

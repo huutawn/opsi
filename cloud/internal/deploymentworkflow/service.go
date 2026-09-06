@@ -169,7 +169,17 @@ func reconcileDraftIssues(draft Plan) []repositoryanalysis.Issue {
 	}
 	validDependencies := true
 	for _, dependency := range draft.Dependencies {
-		validDependencies = validDependencies && (!dependency.Required || dependency.Protocol == "postgres" || dependency.Protocol == "redis" || dependency.Protocol == "nats" || dependency.Verification != nil)
+		validDependencies = validDependencies && (!dependency.Required || dependency.Protocol == "postgres" || dependency.Protocol == "redis" || dependency.Protocol == "nats" || dependency.Protocol == "kafka" || dependency.Verification != nil)
+	}
+	validKafkaReviews := true
+	for _, resource := range draft.Resources {
+		if resource.Managed && resource.Type == "kafka" {
+			acknowledged := false
+			for _, acknowledgement := range resource.Acknowledgements {
+				acknowledged = acknowledged || acknowledgement == "kafka_single_node_experimental"
+			}
+			validKafkaReviews = validKafkaReviews && acknowledged
+		}
 	}
 	validSecrets := true
 	for _, secret := range draft.Secrets {
@@ -181,6 +191,7 @@ func reconcileDraftIssues(draft Plan) []repositoryanalysis.Issue {
 		"CANONICAL_KEY_COLLISION":               validKeys,
 		"CANONICAL_KEY_INVALID":                 validKeys,
 		"DEPENDENCY_VERIFICATION_REQUIRED":      validDependencies,
+		"KAFKA_EXPERIMENTAL_REVIEW_REQUIRED":    validKafkaReviews,
 		"EXTERNAL_SECRET_REFERENCE_REQUIRED":    validSecrets,
 		"COMPOSE_SECRET_VALUE_AMBIGUOUS":        validSecrets,
 		"PUBLIC_HOSTNAME_REQUIRED":              draft.Target.Exposure != "public" || draft.Target.Hostname != "",
@@ -206,6 +217,24 @@ func reconcileDraftIssues(draft Plan) []repositoryanalysis.Issue {
 				Message:    "Application " + app.Key + " requires environment variables, secrets, or confirmation.",
 				Path:       "applications[" + app.SourceKey + "].runtime_configuration",
 				Resolution: "Add environment variables, attach secrets, or confirm that no environment is required.",
+				Blocking:   true,
+			})
+		}
+	}
+	for _, resource := range draft.Resources {
+		if !resource.Managed || resource.Type != "kafka" {
+			continue
+		}
+		acknowledged := false
+		for _, acknowledgement := range resource.Acknowledgements {
+			acknowledged = acknowledged || acknowledgement == "kafka_single_node_experimental"
+		}
+		if !acknowledged {
+			issues = append(issues, repositoryanalysis.Issue{
+				Code:       "KAFKA_EXPERIMENTAL_REVIEW_REQUIRED",
+				Message:    "Managed Kafka is a single-node experimental broker without HA or automated backup.",
+				Path:       "resources[" + resource.LogicalName + "].acknowledgements",
+				Resolution: "Review the Kafka limitations and acknowledge the exact experimental profile.",
 				Blocking:   true,
 			})
 		}

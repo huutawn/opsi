@@ -22,7 +22,10 @@ func seedTestProbe(t testing.TB, reg API, projectID, host string, port int) stri
 	}
 	pubKey := base64.StdEncoding.EncodeToString(signer.PublicKey().Marshal())
 	fingerprint := ssh.FingerprintSHA256(signer.PublicKey())
-	obs, err := reg.CreateSSHHostKeyObservation(projectID, host, port, host, ssh.KeyAlgoED25519, pubKey, fingerprint, "test-user", time.Now().UTC())
+	// This shared fixture has no caller identity. The production API supplies a
+	// project member ID; leaving the nullable audit field empty preserves the
+	// database foreign-key invariant instead of inventing a user.
+	obs, err := reg.CreateSSHHostKeyObservation(projectID, host, port, host, ssh.KeyAlgoED25519, pubKey, fingerprint, "", time.Now().UTC())
 	if err != nil {
 		t.Fatalf("seedTestProbe failed: %v", err)
 	}
