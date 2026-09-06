@@ -94,7 +94,11 @@ func (r ManagedResourceReconciler) apply(ctx context.Context, spec resourcev1.Ma
 			return nil, err
 		}
 	}
-	return r.waitReady(ctx, spec)
+	evidence, err := r.waitReady(ctx, spec)
+	if err != nil || spec.ResourceType != resourcev1.TypeKafka {
+		return evidence, err
+	}
+	return r.ensureKafkaTopics(ctx, spec, evidence)
 }
 
 func (r ManagedResourceReconciler) ensureNamespace(ctx context.Context, spec resourcev1.ManagedResourceSpec) error {
@@ -137,6 +141,11 @@ func (r ManagedResourceReconciler) delete(ctx context.Context, spec resourcev1.M
 	workloadKind := "deployment"
 	if managedStorageRequired(spec.ResourceType) {
 		workloadKind = "statefulset"
+	}
+	if spec.ResourceType == resourcev1.TypeKafka {
+		if _, err := r.run(ctx, nil, "delete", "job", "-n", managedResourceNamespace(spec), "-l", selectorString(managedResourceOwnershipLabels(spec)), "--wait=true", "--timeout=2m", "--ignore-not-found"); err != nil {
+			return nil, err
+		}
 	}
 	for _, kind := range []string{workloadKind, "service", "secret"} {
 		if kind == "secret" && !managedCredentialRequired(spec.ResourceType) {

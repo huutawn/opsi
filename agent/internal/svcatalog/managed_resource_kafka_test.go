@@ -87,6 +87,8 @@ func (r *kafkaRunner) Run(_ context.Context, input []byte, _ string, args ...str
 			object["status"] = map[string]any{"observedGeneration": float64(1), "readyReplicas": float64(1), "currentRevision": "revision-1", "updateRevision": "revision-1"}
 		case "Service":
 			object["spec"].(map[string]any)["clusterIP"] = "10.43.0.12"
+		case "Job":
+			object["status"] = map[string]any{"succeeded": float64(1)}
 		}
 		r.objects[strings.ToLower(kind)+"/"+metadata["name"].(string)] = object
 		return nil, nil
@@ -300,6 +302,30 @@ func TestKafkaReconcileIsIdempotentUpdatesComputeAndRetainsPVC(t *testing.T) {
 	}
 	if runner.objects["persistentvolumeclaim/"+managedResourcePVCName(spec)] == nil {
 		t.Fatal("PVC was destroyed during delete")
+	}
+}
+
+func TestKafkaReconcileCreatesDeclaredTopicsWithMountedCredentials(t *testing.T) {
+	spec, credential := kafkaSpec(t)
+	spec.Topics = []resourcev1.KafkaTopic{
+		{Name: "calendar.notification-batch.v1", Partitions: 6},
+		{Name: "calendar.reminder-due.v2", Partitions: 3, RetentionHours: 168},
+	}
+	spec.ConfigurationHash = strings.Repeat("q", 64)
+	spec.SpecHash, _ = spec.Hash()
+	runner := &kafkaRunner{objects: map[string]map[string]any{}}
+	result := (ManagedResourceReconciler{Runner: runner, Timeout: time.Second, PollInterval: time.Millisecond}).Reconcile(context.Background(), cloudrelay.ManagedResourceLease{Action: "apply", LeaseToken: "topics", Spec: spec, Credential: credential})
+	if result.Status != "ready" || result.Evidence == nil || !result.Evidence.TopicsReady {
+		t.Fatalf("topic reconcile=%+v", result)
+	}
+	job := runner.objects["job/"+kafkaTopicsJobName(spec)]
+	if job == nil {
+		t.Fatal("Kafka topic Job was not created")
+	}
+	encoded, _ := json.Marshal(job)
+	manifest := string(encoded)
+	if !strings.Contains(manifest, "calendar.notification-batch.v1") || !strings.Contains(manifest, "client.properties") || strings.Contains(manifest, credential.Password) {
+		t.Fatalf("unsafe or incomplete topic Job manifest: %s", manifest)
 	}
 }
 

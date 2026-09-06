@@ -191,3 +191,19 @@ func TestKafkaRetainedStorageDestroySpecValidation(t *testing.T) {
 		t.Fatalf("kafka retained storage destroy spec rejected: %v", err)
 	}
 }
+
+func TestValidateKafkaTopicsRejectsUnsafeAndNonCanonicalTopics(t *testing.T) {
+	if err := ValidateKafkaTopics([]KafkaTopic{{Name: "calendar.events.v1", Partitions: 3}, {Name: "calendar.notifications.v1", Partitions: 6, RetentionHours: 168}}); err != nil {
+		t.Fatalf("valid Kafka topics rejected: %v", err)
+	}
+	for _, topics := range [][]KafkaTopic{
+		{{Name: "bad topic", Partitions: 1}},
+		{{Name: "topic", Partitions: 0}},
+		{{Name: "z", Partitions: 1}, {Name: "a", Partitions: 1}},
+		{{Name: "topic", Partitions: 1, RetentionHours: 8761}},
+	} {
+		if err := ValidateKafkaTopics(topics); err == nil {
+			t.Fatalf("invalid Kafka topics accepted: %+v", topics)
+		}
+	}
+}

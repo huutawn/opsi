@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 func managedDefinition(resourceType Type, display string, port int, protocol Protocol, stateful, storageRequired bool, credentials, values []string) ResourceTypeDefinition {
@@ -183,6 +184,33 @@ func ValidateKafkaServiceConfig(config map[string]string) error {
 		default:
 			return fmt.Errorf("unsupported Kafka service config key: %s", k)
 		}
+	}
+	return nil
+}
+
+// ValidateKafkaTopics keeps declarative managed Kafka topics bounded and
+// canonical. Topic order is part of the immutable resource specification.
+func ValidateKafkaTopics(topics []KafkaTopic) error {
+	previous := ""
+	for _, topic := range topics {
+		if topic.Name == "" || topic.Name != strings.TrimSpace(topic.Name) || len(topic.Name) > 249 || topic.Name == "." || topic.Name == ".." {
+			return errors.New("topic name is invalid")
+		}
+		for _, value := range topic.Name {
+			if !(value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' || value == '.' || value == '_' || value == '-') {
+				return errors.New("topic name is invalid")
+			}
+		}
+		if topic.Name <= previous {
+			return errors.New("topics must be unique and sorted by name")
+		}
+		if topic.Partitions < 1 || topic.Partitions > 100 {
+			return errors.New("topic partitions must be between 1 and 100")
+		}
+		if topic.RetentionHours < 0 || topic.RetentionHours > 8760 {
+			return errors.New("topic retention hours must be between 1 and 8760")
+		}
+		previous = topic.Name
 	}
 	return nil
 }

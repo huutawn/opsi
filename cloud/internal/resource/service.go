@@ -428,6 +428,9 @@ func validateManaged(spec resourcev1.ManagedSpec) error {
 		if err := resourcev1.ValidateKafkaServiceConfig(spec.ServiceConfig); err != nil {
 			return invalid("RESOURCE_CONFIG_INVALID", err.Error())
 		}
+		if err := resourcev1.ValidateKafkaTopics(spec.Topics); err != nil {
+			return invalid("RESOURCE_KAFKA_TOPICS_INVALID", err.Error())
+		}
 		if spec.Storage.PolicyRef != "" && spec.Storage.PolicyRef != resourcev1.StoragePolicyDefault {
 			return invalid(resourcev1.FailureStorageInvalid, "managed Kafka storage policy is unsupported")
 		}
@@ -437,7 +440,7 @@ func validateManaged(spec resourcev1.ManagedSpec) error {
 		if spec.Replicas != 1 {
 			return invalid("MANAGED_RESOURCE_REPLICAS_INVALID", "managed Kafka replicas must be exactly 1 in single-node-experimental")
 		}
-	} else if len(spec.ServiceConfig) != 0 {
+	} else if len(spec.ServiceConfig) != 0 || len(spec.Topics) != 0 {
 		return invalid("RESOURCE_CONFIG_UNSUPPORTED", "resource type has no configurable service keys in P07A")
 	}
 	if spec.Type == resourcev1.TypePostgres {
@@ -479,6 +482,22 @@ func validateManaged(spec resourcev1.ManagedSpec) error {
 func validateManagedUpdate(current resourcev1.Resource, next resourcev1.ManagedSpec) error {
 	if current.Runtime == nil {
 		return nil
+	}
+	if current.Type == resourcev1.TypeKafka && current.Managed != nil {
+		previous := make(map[string]resourcev1.KafkaTopic, len(current.Managed.Topics))
+		for _, topic := range current.Managed.Topics {
+			previous[topic.Name] = topic
+		}
+		nextByName := make(map[string]resourcev1.KafkaTopic, len(next.Topics))
+		for _, topic := range next.Topics {
+			nextByName[topic.Name] = topic
+		}
+		for name, topic := range previous {
+			candidate, ok := nextByName[name]
+			if !ok || candidate.Partitions < topic.Partitions {
+				return invalid("RESOURCE_KAFKA_TOPIC_MUTATION_UNSUPPORTED", "Kafka topic deletion and partition decreases are not supported")
+			}
+		}
 	}
 	if current.Type == resourcev1.TypePostgres {
 		version := strings.TrimSpace(next.Version)
@@ -626,6 +645,7 @@ func cloneManaged(value *resourcev1.ManagedSpec) *resourcev1.ManagedSpec {
 	}
 	out := *value
 	out.ServiceConfig = cloneMap(value.ServiceConfig)
+	out.Topics = append([]resourcev1.KafkaTopic(nil), value.Topics...)
 	out.CredentialRefs = append([]resourcev1.SecretReference(nil), value.CredentialRefs...)
 	return &out
 }

@@ -408,6 +408,13 @@ func ValidatePlan(plan Plan) error {
 			if resourceType == resourcev1.TypeKafka && !acknowledgements["kafka_single_node_experimental"] {
 				return errors.New("managed Kafka single-node experimental risk acknowledgement is required")
 			}
+			if resourceType == resourcev1.TypeKafka {
+				if err := resourcev1.ValidateKafkaTopics(resource.Topics); err != nil {
+					return fmt.Errorf("deployment plan Kafka topics are invalid: %w", err)
+				}
+			} else if len(resource.Topics) != 0 {
+				return errors.New("deployment plan non-Kafka resource has Kafka topics")
+			}
 			persistence := resource.Persistence
 			if definition.Storage.Required && (persistence == nil || !persistence.Persistent) {
 				return errors.New("deployment plan managed resource requires persistent storage")

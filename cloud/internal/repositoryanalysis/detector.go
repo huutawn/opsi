@@ -263,12 +263,13 @@ func firstTruncationReason(reasons map[string]bool) string {
 type explicitConfig struct {
 	Version   int `yaml:"version"`
 	Resources []struct {
-		LogicalName string            `yaml:"logicalName"`
-		Type        string            `yaml:"type"`
-		Managed     bool              `yaml:"managed"`
-		Required    bool              `yaml:"required"`
-		Persistence *Persistence      `yaml:"persistence"`
-		Settings    map[string]string `yaml:"settings"`
+		LogicalName string                  `yaml:"logicalName"`
+		Type        string                  `yaml:"type"`
+		Managed     bool                    `yaml:"managed"`
+		Required    bool                    `yaml:"required"`
+		Persistence *Persistence            `yaml:"persistence"`
+		Settings    map[string]string       `yaml:"settings"`
+		Topics      []resourcev1.KafkaTopic `yaml:"topics"`
 	} `yaml:"resources"`
 	Services []struct {
 		Key          string                                         `yaml:"key"`
@@ -346,7 +347,7 @@ func parseExplicit(data []byte, files map[string]File) (explicitResult, error) {
 		}
 		resourceNames[resource.LogicalName] = true
 		evidence := Evidence{Path: ".opsi/opsi-cd.yaml", Kind: "explicit_config", Reason: "Resource intent is declared by the repository owner.", Confidence: ConfidenceHigh}
-		result.Resources = append(result.Resources, Resource{LogicalName: resource.LogicalName, Type: resource.Type, Managed: resource.Managed, Required: resource.Required, Persistence: resource.Persistence, Settings: resource.Settings, Confidence: ConfidenceHigh, Reason: evidence.Reason, Evidence: []Evidence{evidence}})
+		result.Resources = append(result.Resources, Resource{LogicalName: resource.LogicalName, Type: resource.Type, Managed: resource.Managed, Required: resource.Required, Persistence: resource.Persistence, Settings: resource.Settings, Topics: resource.Topics, Confidence: ConfidenceHigh, Reason: evidence.Reason, Evidence: []Evidence{evidence}})
 	}
 	for _, service := range cfg.Services {
 		if !validKey(service.Key) || seen[service.Key] {
@@ -433,6 +434,8 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 			DependsOn   yaml.Node `yaml:"depends_on"`
 			Environment yaml.Node `yaml:"environment"`
 			Volumes     []string  `yaml:"volumes"`
+			Entrypoint  yaml.Node `yaml:"entrypoint"`
+			Command     yaml.Node `yaml:"command"`
 			Healthcheck struct {
 				Test []string `yaml:"test"`
 			} `yaml:"healthcheck"`
@@ -464,9 +467,17 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 				}
 			}
 			var settings map[string]string
+			var topics []resourcev1.KafkaTopic
 			if kind == "kafka" {
 				composeEnv, _ := composeEnvironment(service.Environment)
 				settings = extractKafkaComposeSettings(composeEnv)
+				if strings.HasPrefix(name, "kafka-init") {
+					var topicErr error
+					topics, topicErr = extractKafkaComposeTopics(service.Entrypoint, service.Command)
+					if topicErr != nil {
+						issues = append(issues, Issue{Code: "KAFKA_TOPIC_INIT_UNSUPPORTED", Message: "Kafka topic initialization must use a direct kafka-topics.sh command list.", Path: composePath, Resolution: "Declare topics in the Opsi plan review instead of executing a shell command.", Blocking: false})
+					}
+				}
 			}
 			merged := false
 			for i := range resources {
@@ -481,12 +492,15 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 							resources[i].Settings[sk] = sv
 						}
 					}
+					if len(topics) > 0 {
+						resources[i].Topics, issues = mergeKafkaTopics(resources[i].Topics, topics, issues, composePath)
+					}
 					merged = true
 					break
 				}
 			}
 			if !merged {
-				resources = append(resources, Resource{LogicalName: logicalName, Type: kind, Managed: true, Required: true, Persistence: persistence, Settings: settings, Recommendation: recommendation, Confidence: ConfidenceHigh, Reason: evidence.Reason, Evidence: []Evidence{evidence}})
+				resources = append(resources, Resource{LogicalName: logicalName, Type: kind, Managed: true, Required: true, Persistence: persistence, Settings: settings, Topics: topics, Recommendation: recommendation, Confidence: ConfidenceHigh, Reason: evidence.Reason, Evidence: []Evidence{evidence}})
 			}
 			resourceNames[name] = kind
 			resourceLogicalNames[name] = logicalName
@@ -552,7 +566,84 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 			}
 		}
 	}
+	for i := range resources {
+		if resources[i].Type == "kafka" {
+			sort.Slice(resources[i].Topics, func(a, b int) bool { return resources[i].Topics[a].Name < resources[i].Topics[b].Name })
+		}
+	}
 	return apps, resources, deps, issues
+}
+
+func extractKafkaComposeTopics(entrypoint, command yaml.Node) ([]resourcev1.KafkaTopic, error) {
+	args, ok := yamlStringList(entrypoint)
+	if !ok || len(args) != 1 || !strings.HasSuffix(args[0], "/kafka-topics.sh") {
+		return nil, errors.New("entrypoint is not kafka-topics.sh")
+	}
+	args, ok = yamlStringList(command)
+	if !ok {
+		return nil, errors.New("command is not a list")
+	}
+	values := map[string]string{}
+	create, idempotent := false, false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--create":
+			create = true
+		case "--if-not-exists":
+			idempotent = true
+		case "--bootstrap-server", "--topic", "--partitions", "--replication-factor":
+			if i+1 >= len(args) || values[args[i]] != "" {
+				return nil, errors.New("invalid topic argument")
+			}
+			i++
+			values[args[i-1]] = args[i]
+		default:
+			return nil, errors.New("unsupported topic command argument")
+		}
+	}
+	partitions, err := strconv.ParseInt(values["--partitions"], 10, 32)
+	if !create || !idempotent || values["--bootstrap-server"] == "" || values["--topic"] == "" || values["--replication-factor"] != "1" || err != nil {
+		return nil, errors.New("invalid topic command")
+	}
+	topic := resourcev1.KafkaTopic{Name: values["--topic"], Partitions: int32(partitions)}
+	if err := resourcev1.ValidateKafkaTopics([]resourcev1.KafkaTopic{topic}); err != nil {
+		return nil, err
+	}
+	return []resourcev1.KafkaTopic{topic}, nil
+}
+
+func yamlStringList(node yaml.Node) ([]string, bool) {
+	if node.Kind != yaml.SequenceNode {
+		return nil, false
+	}
+	values := make([]string, 0, len(node.Content))
+	for _, value := range node.Content {
+		if value.Kind != yaml.ScalarNode || value.Tag != "!!str" {
+			return nil, false
+		}
+		values = append(values, value.Value)
+	}
+	return values, true
+}
+
+func mergeKafkaTopics(existing, incoming []resourcev1.KafkaTopic, issues []Issue, composePath string) ([]resourcev1.KafkaTopic, []Issue) {
+	byName := make(map[string]resourcev1.KafkaTopic, len(existing)+len(incoming))
+	for _, topic := range existing {
+		byName[topic.Name] = topic
+	}
+	for _, topic := range incoming {
+		if prior, ok := byName[topic.Name]; ok && prior != topic {
+			issues = append(issues, Issue{Code: "KAFKA_TOPIC_CONFLICT", Message: "Kafka topic declarations disagree across Compose services.", Path: composePath, Resolution: "Select one partition count in the plan review.", Blocking: true})
+			continue
+		}
+		byName[topic.Name] = topic
+	}
+	result := make([]resourcev1.KafkaTopic, 0, len(byName))
+	for _, topic := range byName {
+		result = append(result, topic)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result, issues
 }
 
 func extractKafkaComposeSettings(env map[string]string) map[string]string {

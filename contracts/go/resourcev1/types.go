@@ -167,8 +167,18 @@ type ManagedSpec struct {
 	MemoryBytes      int64             `json:"memory_bytes"`
 	Storage          StorageRequest    `json:"storage"`
 	ServiceConfig    map[string]string `json:"service_config,omitempty"`
+	Topics           []KafkaTopic      `json:"topics,omitempty"`
 	CredentialRefs   []SecretReference `json:"credential_refs,omitempty"`
 	ConnectionPolicy ExposurePolicy    `json:"connection_policy"`
+}
+
+// KafkaTopic is a declarative, non-secret Kafka topic contract. Topics are
+// provisioned by the managed Kafka reconciler; Opsi never executes repository
+// supplied shell commands to create them.
+type KafkaTopic struct {
+	Name           string `json:"name"`
+	Partitions     int32  `json:"partitions"`
+	RetentionHours int32  `json:"retention_hours,omitempty"`
 }
 
 const ManagedResourceSpecSchemaVersion = "opsi.managed_resource_spec/v1"
@@ -338,6 +348,7 @@ type ManagedResourceSpec struct {
 	Connection        ManagedResourceConnection `json:"connection"`
 	CredentialID      string                    `json:"credential_id,omitempty"`
 	ServiceConfig     map[string]string         `json:"service_config,omitempty"`
+	Topics            []KafkaTopic              `json:"topics,omitempty"`
 	ConfigurationHash string                    `json:"configuration_hash"`
 	TopologyRevision  uint64                    `json:"topology_revision"`
 	TopologyHash      string                    `json:"topology_hash"`
@@ -410,7 +421,10 @@ func (s ManagedResourceSpec) Validate() error {
 		if err := ValidateKafkaServiceConfig(s.ServiceConfig); err != nil {
 			return errors.New("managed Kafka service config is invalid: " + err.Error())
 		}
-	} else if len(s.ServiceConfig) != 0 {
+		if err := ValidateKafkaTopics(s.Topics); err != nil {
+			return errors.New("managed Kafka topics are invalid: " + err.Error())
+		}
+	} else if len(s.ServiceConfig) != 0 || len(s.Topics) != 0 {
 		return errors.New("managed resource service config is invalid")
 	}
 	hash, err := s.Hash()
@@ -427,6 +441,7 @@ type ManagedResourceEvidence struct {
 	ServiceReady      bool      `json:"service_ready"`
 	SecretReady       bool      `json:"secret_ready"`
 	AuthReady         bool      `json:"auth_ready"`
+	TopicsReady       bool      `json:"topics_ready,omitempty"`
 	Image             string    `json:"image"`
 	ImageID           string    `json:"image_id,omitempty"`
 	AvailableReplicas int32     `json:"available_replicas"`

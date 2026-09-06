@@ -252,7 +252,7 @@ func (e deploymentWorkflowExecutor) ensureResources(ctx context.Context, run dep
 			managedCPU, managedMemory := deploymentworkflow.PlannedManagedResourceCapacity(detected.Type)
 			value, _, err = e.server.Resources.Create(ctx, run.ProjectID, run.CreatedBy, workflowExecutionKey(run, "resource", detected.LogicalName), resourcev1.CreateRequest{
 				EnvironmentID: run.Plan.Target.EnvironmentID, Name: detected.LogicalName, Kind: resourcev1.KindManagedService, Type: resourceType,
-				Managed: &resourcev1.ManagedSpec{Type: resourceType, Version: version.Version, Profile: profile.Name, Replicas: 1, CPUMillicores: managedCPU, MemoryBytes: managedMemory, Storage: storage, ServiceConfig: detected.Settings, ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"}},
+				Managed: &resourcev1.ManagedSpec{Type: resourceType, Version: version.Version, Profile: profile.Name, Replicas: 1, CPUMillicores: managedCPU, MemoryBytes: managedMemory, Storage: storage, ServiceConfig: detected.Settings, Topics: append([]resourcev1.KafkaTopic(nil), detected.Topics...), ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"}},
 			})
 			if err != nil {
 				return result, ids, err

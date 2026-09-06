@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 )
 
@@ -85,7 +87,7 @@ func kafkaManagedResourceObjects(spec resourcev1.ManagedResourceSpec, credential
 			map[string]any{"name": "KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "value": "1"},
 			map[string]any{"name": "KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "value": "1"},
 			map[string]any{"name": "KAFKA_LOG_DIRS", "value": kafkaDataMount},
-			map[string]any{"name": "KAFKA_AUTO_CREATE_TOPICS_ENABLE", "value": "true"},
+			map[string]any{"name": "KAFKA_AUTO_CREATE_TOPICS_ENABLE", "value": "false"},
 			map[string]any{"name": "KAFKA_NUM_PARTITIONS", "value": numPartitions},
 			map[string]any{"name": "KAFKA_LOG_RETENTION_HOURS", "value": retentionHours},
 			map[string]any{"name": "KAFKA_HEAP_OPTS", "value": "-Xms512m -Xmx512m"},
@@ -135,6 +137,106 @@ func kafkaManagedResourceObjects(spec resourcev1.ManagedResourceSpec, credential
 	}
 
 	return []map[string]any{secret, pvc, statefulSet, service}
+}
+
+func kafkaTopicsJobName(spec resourcev1.ManagedResourceSpec) string {
+	hash := spec.ConfigurationHash
+	if len(hash) > 12 {
+		hash = hash[:12]
+	}
+	return deploymentv1.StableDNSName("omr", spec.ResourceID, "topics", hash)
+}
+
+func kafkaTopicsJob(spec resourcev1.ManagedResourceSpec) map[string]any {
+	labels := managedResourceLabels(spec)
+	labels["opsi.dev/kafka-topics"] = "true"
+	args := make([]string, 0, len(spec.Topics))
+	for _, topic := range spec.Topics {
+		command := fmt.Sprintf("/opt/kafka/bin/kafka-topics.sh --bootstrap-server \"$1\" --command-config %s/client.properties --create --if-not-exists --topic %s --partitions %d --replication-factor 1", kafkaSecretDir, topic.Name, topic.Partitions)
+		if topic.RetentionHours > 0 {
+			command += fmt.Sprintf(" --config retention.ms=%d", int64(topic.RetentionHours)*3600*1000)
+		}
+		args = append(args, command)
+	}
+	script := strings.Join(args, "\n")
+	namespace, secretName := managedResourceNamespace(spec), managedResourceSecretName(spec)
+	return map[string]any{
+		"apiVersion": "batch/v1", "kind": "Job",
+		"metadata": map[string]any{"name": kafkaTopicsJobName(spec), "namespace": namespace, "labels": labels, "annotations": managedResourceAnnotations(spec)},
+		"spec": map[string]any{
+			"backoffLimit": int32(3), "ttlSecondsAfterFinished": int32(3600),
+			"template": map[string]any{
+				"metadata": map[string]any{"labels": labels},
+				"spec": map[string]any{
+					"restartPolicy": "Never",
+					"containers": []any{map[string]any{
+						"name": "kafka-topics", "image": spec.Image, "imagePullPolicy": "IfNotPresent",
+						"command":      []any{"sh", "-ec", script, "opsi-kafka-topics", spec.Connection.Host + ":9092"},
+						"volumeMounts": []any{map[string]any{"name": "client-credential", "mountPath": kafkaSecretDir, "readOnly": true}},
+					}},
+					"volumes": []any{map[string]any{"name": "client-credential", "secret": map[string]any{"secretName": secretName, "defaultMode": 256}}},
+				},
+			},
+		},
+	}
+}
+
+func (r ManagedResourceReconciler) ensureKafkaTopics(ctx context.Context, spec resourcev1.ManagedResourceSpec, evidence *resourcev1.ManagedResourceEvidence) (*resourcev1.ManagedResourceEvidence, error) {
+	if len(spec.Topics) == 0 {
+		evidence.TopicsReady = true
+		return evidence, nil
+	}
+	job := kafkaTopicsJob(spec)
+	current, err := r.get(ctx, "job", kafkaTopicsJobName(spec), managedResourceNamespace(spec))
+	if err != nil {
+		return evidence, err
+	}
+	if current == nil {
+		data, _ := json.Marshal(job)
+		if _, err := r.run(ctx, data, "create", "--field-manager="+managedResourceFieldManager, "-f", "-"); err != nil {
+			return evidence, managedResourceError{resourcev1.FailureApplyFailed, "managed Kafka topic Job apply failed"}
+		}
+	} else if !exactManagedResourceOwnership(current, spec) {
+		return evidence, managedResourceError{resourcev1.FailureApplyFailed, "managed Kafka topic Job has different ownership"}
+	}
+	deadline := time.NewTimer(r.kafkaTopicTimeout())
+	defer deadline.Stop()
+	ticker := time.NewTicker(r.kafkaTopicPollInterval())
+	defer ticker.Stop()
+	for {
+		current, err = r.get(ctx, "job", kafkaTopicsJobName(spec), managedResourceNamespace(spec))
+		if err != nil {
+			return evidence, err
+		}
+		if current != nil && number(nested(current, "status", "succeeded")) >= 1 {
+			evidence.TopicsReady = true
+			return evidence, nil
+		}
+		if current != nil && number(nested(current, "status", "failed")) > 0 {
+			return evidence, managedResourceError{resourcev1.FailureReadinessFailed, "managed Kafka topic Job failed"}
+		}
+		select {
+		case <-ctx.Done():
+			return evidence, ctx.Err()
+		case <-deadline.C:
+			return evidence, managedResourceError{resourcev1.FailureReadinessFailed, "managed Kafka topic Job timed out"}
+		case <-ticker.C:
+		}
+	}
+}
+
+func (r ManagedResourceReconciler) kafkaTopicTimeout() time.Duration {
+	if r.Timeout > 0 {
+		return r.Timeout
+	}
+	return 3 * time.Minute
+}
+
+func (r ManagedResourceReconciler) kafkaTopicPollInterval() time.Duration {
+	if r.PollInterval > 0 {
+		return r.PollInterval
+	}
+	return 2 * time.Second
 }
 
 func (r ManagedResourceReconciler) observeKafka(ctx context.Context, spec resourcev1.ManagedResourceSpec) (*resourcev1.ManagedResourceEvidence, error) {

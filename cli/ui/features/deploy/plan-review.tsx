@@ -5,7 +5,7 @@ import { connectionProtocols, transitionMappings } from "@/features/deploy/conne
 import { publicSubdomainFromHostname, publicSubdomainSuffix, validatePublicSubdomain } from "@/features/deploy/public-subdomain";
 import { PlanCheck as Check, PlanField as Field, planSelectClass as selectClass } from "@/features/deploy/plan-form-controls";
 import { RuntimeConfigurationEditor } from "@/features/deploy/runtime-configuration-editor";
-import type { DeploymentPlan, ResourceTypeDefinition, ServiceRecord, WorkloadSecretMetadata } from "@/lib/contracts/registry";
+import type { DeploymentPlan, KafkaTopic, ResourceTypeDefinition, ServiceRecord, WorkloadSecretMetadata } from "@/lib/contracts/registry";
 import { getApplicationEffectiveKeys, getUnreviewedApplications, getUnreviewedResources, isApplicationConfirmed } from "@/features/deploy/runtime-config";
 
 type Props = {
@@ -335,6 +335,30 @@ export function PlanReview({ canEdit, dirty, onPlan, onProposal, onResolveSecret
                         })} />
                       </Field>
                     </div>
+                    <div className="space-y-2 border-t border-outline-variant/20 pt-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold text-on-surface">Declared topics</span>
+                        <Button type="button" variant="outline" onClick={() => update((draft) => {
+                          const topics = draft.resources[index].topics || [];
+                          draft.resources[index].topics = sortKafkaTopics([...topics, {
+                            name: nextKafkaTopicName(topics),
+                            partitions: Number(resource.settings?.num_partitions || kafkaConfig("num_partitions")?.default || 3),
+                          }]);
+                        })}>Add topic</Button>
+                      </div>
+                      {(resource.topics || []).length === 0 ? <p className="text-on-surface-variant">No topic is declared. Add every topic required by the application before approval.</p> : (
+                        <div className="space-y-2">
+                          {(resource.topics || []).map((topic, topicIndex) => (
+                            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_8rem_8rem_auto]" key={`${topic.name}-${topicIndex}`}>
+                              <Input aria-label={`Kafka topic ${topicIndex + 1} name`} value={topic.name} onChange={(event) => update((draft) => { const topics = [...(draft.resources[index].topics || [])]; topics[topicIndex] = { ...topics[topicIndex], name: event.target.value }; draft.resources[index].topics = sortKafkaTopics(topics); })} />
+                              <Input aria-label={`Kafka topic ${topic.name} partitions`} min={1} max={100} type="number" value={topic.partitions} onChange={(event) => update((draft) => { const topics = [...(draft.resources[index].topics || [])]; topics[topicIndex] = { ...topics[topicIndex], partitions: Number(event.target.value) }; draft.resources[index].topics = topics; })} />
+                              <Input aria-label={`Kafka topic ${topic.name} retention hours`} min={1} max={8760} type="number" placeholder="Broker default" value={topic.retention_hours || ""} onChange={(event) => update((draft) => { const topics = [...(draft.resources[index].topics || [])]; topics[topicIndex] = { ...topics[topicIndex], retention_hours: optionalNumber(event.target.value) }; draft.resources[index].topics = topics; })} />
+                              <Button aria-label={`Remove Kafka topic ${topic.name}`} type="button" variant="outline" onClick={() => update((draft) => { draft.resources[index].topics = (draft.resources[index].topics || []).filter((_, candidateIndex) => candidateIndex !== topicIndex); })}>Remove</Button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                     <div className="rounded border border-status-warning/40 bg-status-warning/10 p-2.5 text-xs text-on-surface">
                       <div className="flex items-center gap-2 font-medium text-status-warning">
                         <Icon name="warning" className="text-sm" />
@@ -465,6 +489,18 @@ function Evidence({ confidence, evidence, reason }: { confidence: string; eviden
       </ul>
     </details>
   );
+}
+
+function sortKafkaTopics(topics: KafkaTopic[]) {
+  return [...topics].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function nextKafkaTopicName(topics: KafkaTopic[]) {
+  const names = new Set(topics.map((topic) => topic.name));
+  for (let sequence = 1; ; sequence++) {
+    const candidate = `new-topic-${sequence}`;
+    if (!names.has(candidate)) return candidate;
+  }
 }
 
 function optionalNumber(value: string) {

@@ -622,3 +622,53 @@ func TestKafkaDotNetAndSpringDialectDetection(t *testing.T) {
 		}
 	}
 }
+
+func TestKafkaTopicInitIsImportedWithoutExecutingCompose(t *testing.T) {
+	result := analyze(t, memoryRepository{
+		"compose.yaml": `services:
+  api:
+    build: {context: api, dockerfile: Dockerfile}
+    depends_on: [kafka]
+  kafka:
+    image: apache/kafka:4.3.1
+  kafka-init-reminder:
+    image: apache/kafka:4.3.1
+    entrypoint: ["/opt/kafka/bin/kafka-topics.sh"]
+    command: ["--bootstrap-server", "kafka:9092", "--create", "--if-not-exists", "--topic", "calendar.reminder-due.v2", "--partitions", "3", "--replication-factor", "1"]
+  kafka-init-notifications:
+    image: apache/kafka:4.3.1
+    entrypoint: ["/opt/kafka/bin/kafka-topics.sh"]
+    command: ["--bootstrap-server", "kafka:9092", "--create", "--if-not-exists", "--topic", "calendar.notification-batch.v1", "--partitions", "6", "--replication-factor", "1"]
+`,
+		"api/Dockerfile": "FROM scratch\nEXPOSE 8080\n",
+	})
+	for _, resource := range result.Resources {
+		if resource.Type != "kafka" {
+			continue
+		}
+		if len(resource.Topics) != 2 || resource.Topics[0].Name != "calendar.notification-batch.v1" || resource.Topics[0].Partitions != 6 || resource.Topics[1].Name != "calendar.reminder-due.v2" || resource.Topics[1].Partitions != 3 {
+			t.Fatalf("Kafka topics=%+v", resource.Topics)
+		}
+		return
+	}
+	t.Fatal("Kafka resource was not detected")
+}
+
+func TestKafkaTopicInitRejectsShellCommands(t *testing.T) {
+	result := analyze(t, memoryRepository{
+		"compose.yaml": `services:
+  kafka:
+    image: apache/kafka:4.3.1
+  kafka-init:
+    image: apache/kafka:4.3.1
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["kafka-topics.sh --create"]
+`,
+	})
+	for _, issue := range result.Issues {
+		if issue.Code == "KAFKA_TOPIC_INIT_UNSUPPORTED" && !issue.Blocking {
+			return
+		}
+	}
+	t.Fatalf("missing safe-parser warning: %+v", result.Issues)
+}

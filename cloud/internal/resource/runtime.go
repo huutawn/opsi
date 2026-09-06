@@ -166,7 +166,10 @@ func compileManaged(value resourcev1.Resource, assignment resourcev1.ManagedReso
 	if image == "" {
 		return resourcev1.ManagedResourceSpec{}, invalid("MANAGED_RESOURCE_IMAGE_UNAVAILABLE", "managed resource version/profile does not resolve to a trusted image")
 	}
-	configurationHash := hashValue(value.Managed.ServiceConfig)
+	configurationHash := hashValue(struct {
+		ServiceConfig map[string]string       `json:"service_config,omitempty"`
+		Topics        []resourcev1.KafkaTopic `json:"topics,omitempty"`
+	}{ServiceConfig: value.Managed.ServiceConfig, Topics: value.Managed.Topics})
 	// StatefulSet controller-revision labels append their own hash to the
 	// workload name. Keep managed resource names compact so those labels stay
 	// within Kubernetes' 63-character limit.
@@ -201,6 +204,7 @@ func compileManaged(value resourcev1.Resource, assignment resourcev1.ManagedReso
 		Connection:        resourcev1.ManagedResourceConnection{ServiceName: serviceName, Host: host, Port: int32(definition.DefaultPort), Protocol: protocol, Database: database, URL: connectionURL},
 		CredentialID:      credentialID,
 		ServiceConfig:     value.Managed.ServiceConfig,
+		Topics:            append([]resourcev1.KafkaTopic(nil), value.Managed.Topics...),
 		ConfigurationHash: configurationHash, TopologyRevision: topologyRevision, TopologyHash: topologyHash,
 	}
 	hash, err := spec.Hash()
@@ -371,7 +375,7 @@ func (s Service) completePostgresBindings(ctx context.Context, target resourcev1
 }
 
 func factualReady(spec resourcev1.ManagedResourceSpec, evidence *resourcev1.ManagedResourceEvidence) bool {
-	return evidence != nil && evidence.ObservedSpecHash == spec.SpecHash && evidence.WorkloadReady && evidence.PodReady && evidence.ServiceReady && (!managedCredentialRequired(spec.ResourceType) || evidence.SecretReady && evidence.AuthReady) && (!managedStorageRequired(spec.ResourceType) || evidence.StorageReady && evidence.VolumeMounted && evidence.PVCName != "" && evidence.PVName != "") && evidence.Image == spec.Image && imageIDMatches(evidence.ImageID, spec.Image) && evidence.AvailableReplicas >= spec.Replicas
+	return evidence != nil && evidence.ObservedSpecHash == spec.SpecHash && evidence.WorkloadReady && evidence.PodReady && evidence.ServiceReady && (!managedCredentialRequired(spec.ResourceType) || evidence.SecretReady && evidence.AuthReady) && (spec.ResourceType != resourcev1.TypeKafka || len(spec.Topics) == 0 || evidence.TopicsReady) && (!managedStorageRequired(spec.ResourceType) || evidence.StorageReady && evidence.VolumeMounted && evidence.PVCName != "" && evidence.PVName != "") && evidence.Image == spec.Image && imageIDMatches(evidence.ImageID, spec.Image) && evidence.AvailableReplicas >= spec.Replicas
 }
 
 func managedStorageRequired(resourceType resourcev1.Type) bool {
