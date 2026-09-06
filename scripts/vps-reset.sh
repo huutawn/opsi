@@ -155,6 +155,7 @@ if [ -f /etc/fstab ] && grep -q '^[[:space:]]*/var/lib/opsi/swapfile[[:space:]]'
   fi
 fi
 for path in \
+  /etc/systemd/system/opsi-agent.service \
   /etc/opsi \
   /var/lib/opsi \
   /opt/opsi \
