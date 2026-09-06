@@ -127,6 +127,20 @@ func (s Service) ReconcileTopology(ctx context.Context, projectID string, plan t
 			return err
 		}
 		if value.Runtime != nil && value.Runtime.Spec.SpecHash == spec.SpecHash {
+			// A failed apply has released its lease and is not a competing
+			// in-flight reconciliation. An explicit reconciliation of the same
+			// desired topology is therefore the authoritative, bounded retry
+			// boundary. Keep ready and in-flight resources untouched; do not
+			// silently retry degraded resources because they require diagnosis.
+			if value.Lifecycle == resourcev1.LifecycleFailed {
+				value.Lifecycle = resourcev1.LifecyclePlanned
+				value.Runtime.FailureCode = ""
+				value.Runtime.FailureMessage = ""
+				value.UpdatedAt = s.clock()
+				if _, err := s.Store.Update(ctx, value); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		value.Runtime = &resourcev1.ManagedResourceRuntime{Spec: spec}

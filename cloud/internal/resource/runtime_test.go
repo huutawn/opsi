@@ -137,6 +137,48 @@ func TestReconcileTopologyPreservesUnchangedInFlightAndReadyResource(t *testing.
 	}
 }
 
+func TestReconcileTopologyRequeuesExactFailedResourceOnly(t *testing.T) {
+	service := testService()
+	request := managedRequest(resourcev1.TypeNATS)
+	request.Managed.CredentialRefs = nil
+	created, _, err := service.Create(context.Background(), "project-1", "user-1", "nats-failed-reconcile", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := topologyv1.Plan{ProjectID: "project-1", Revision: 1, PlanHash: strings.Repeat("8", 64), Assignments: []topologyv1.Assignment{{ServiceKey: created.ID, EnvironmentID: "env-1", RuntimeID: "runtime-1", Replicas: 1, CPURequestMillicores: 250, MemoryRequestBytes: 256 << 20}}}
+	if err := service.ReconcileTopology(context.Background(), "project-1", plan, staticTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	lease, ok, err := service.LeaseManaged(context.Background(), "project-1", "node-1")
+	if err != nil || !ok {
+		t.Fatalf("lease=%+v ok=%t err=%v", lease, ok, err)
+	}
+	failed, err := service.CompleteManaged(context.Background(), "project-1", created.ID, ManagedResult{Status: "failed", LeaseToken: lease.LeaseToken, FailureCode: resourcev1.FailureReadinessFailed, FailureMessage: "image pull was delayed"})
+	if err != nil || failed.Lifecycle != resourcev1.LifecycleFailed {
+		t.Fatalf("failed=%+v err=%v", failed, err)
+	}
+	if err := service.ReconcileTopology(context.Background(), "project-1", plan, staticTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	requeued, err := service.Get(context.Background(), "project-1", created.ID)
+	if err != nil || requeued.Lifecycle != resourcev1.LifecyclePlanned || requeued.Runtime == nil || requeued.Runtime.FailureCode != "" || requeued.Runtime.FailureMessage != "" {
+		t.Fatalf("requeued=%+v err=%v", requeued, err)
+	}
+
+	requeued.Lifecycle = resourcev1.LifecycleDegraded
+	requeued.Runtime.FailureCode = resourcev1.FailureRuntimeMismatch
+	if _, err := service.Store.Update(context.Background(), requeued); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ReconcileTopology(context.Background(), "project-1", plan, staticTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	degraded, err := service.Get(context.Background(), "project-1", created.ID)
+	if err != nil || degraded.Lifecycle != resourcev1.LifecycleDegraded || degraded.Runtime.FailureCode != resourcev1.FailureRuntimeMismatch {
+		t.Fatalf("degraded=%+v err=%v", degraded, err)
+	}
+}
+
 func TestPostgresCompilerGeneratesStableCredentialAndStorageAuthority(t *testing.T) {
 	service := testService()
 	postgres, _, err := service.Create(context.Background(), "project-1", "user-1", "postgres-runtime", managedRequest(resourcev1.TypePostgres))
