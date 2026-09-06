@@ -106,6 +106,7 @@ type Store interface {
 	ReserveDispatch(context.Context, string, string, DispatchAttempt) error
 	CompleteDispatch(context.Context, string, DispatchFacts, time.Time) (DispatchAttempt, error)
 	RejectDispatch(context.Context, string, string, time.Time) error
+	ExpireUnclaimedDispatch(context.Context, string, string, string, time.Time, time.Time) (Job, bool, error)
 	ClaimDispatch(context.Context, string, string, RunnerIdentity, []byte, time.Time, time.Time) error
 	GetRunnerJob(context.Context, RunnerAccess, time.Time) (Job, error)
 	CompleteRunner(context.Context, Completion, RegistryConfig, ExecutorConfig) (CompletionResult, error)

@@ -110,11 +110,35 @@ jobs:
               json.dump({"build_job_id": os.environ["BUILD_JOB_ID"], "attempt_id": os.environ["ATTEMPT_ID"], "oidc_token": token}, target)
           PY
 
-          curl "${curl_args[@]}" \
+          if ! curl "${curl_args[@]}" \
             -H "Content-Type: application/json" \
             --data-binary "@$claim_dir/claim.json" \
             "$OPSI_CLOUD_URL/v1/build-runner/claim" \
-            -o "$claim_dir/lease.json"
+            -o "$claim_dir/lease.json"; then
+            CLAIM_RESPONSE="$claim_dir/lease.json" python3 - <<'PY'
+          import json, os, sys
+          allowed = {
+              "OIDC_AUDIENCE_INVALID", "OIDC_CLAIMS_INVALID", "OIDC_EXP_INVALID",
+              "OIDC_IAT_INVALID", "OIDC_INVALID", "OIDC_ISSUER_INVALID",
+              "OIDC_NBF_INVALID", "OIDC_SIGNATURE_INVALID", "OIDC_TIME_INVALID",
+              "OIDC_TOKEN_INVALID", "OIDC_WRONG_EVENT", "OIDC_WRONG_REPOSITORY",
+              "OIDC_WRONG_WORKFLOW_REF", "RUNNER_CLAIM_CONSUMED",
+              "RUNNER_CLAIM_INVALID", "EXECUTOR_RUN_MISMATCH", "BUILD_JOB_NOT_FOUND",
+              "BUILD_JOB_NOT_READY",
+          }
+          code = "BUILD_RUNNER_CLAIM_FAILED"
+          try:
+              with open(os.environ["CLAIM_RESPONSE"], encoding="utf-8") as source:
+                  value = json.load(source)
+              candidate = value.get("error", {}).get("code", "")
+              if candidate in allowed:
+                  code = candidate
+          except (OSError, ValueError, AttributeError):
+              pass
+          print("build-runner claim rejected: " + code, file=sys.stderr)
+          PY
+            exit 1
+          fi
 
           lease="$(LEASE_FILE="$claim_dir/lease.json" BUILD_JOB_ID="$BUILD_JOB_ID" ATTEMPT_ID="$ATTEMPT_ID" python3 - <<'PY'
           import json, os

@@ -331,6 +331,32 @@ func TestPostgresBuildExecutorAtomicClaimAndScopedLease(t *testing.T) {
 	}
 }
 
+func TestPostgresBuildExecutorExpiresUnclaimedDispatch(t *testing.T) {
+	db := newBuildJobPostgres(t)
+	store := PostgresStore{DB: db}
+	job := postgresBuildJob("job-claim-timeout", "claim-timeout-key")
+	if _, _, err := store.Create(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(200, 0).UTC()
+	attempt := DispatchAttempt{Provider: ExecutorProviderGitHubActions, AttemptID: "attempt-claim-timeout", BuildJobID: job.ID, Workflow: executorTestConfig().Workflow, WorkflowRef: executorTestConfig().WorkflowRef(), ExecutorRef: executorTestConfig().Ref, DispatchedAt: now, LastState: DispatchStateDispatching}
+	if err := store.ReserveDispatch(context.Background(), job.ProjectID, job.ApplicationID, attempt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteDispatch(context.Background(), attempt.AttemptID, DispatchFacts{}, now); err != nil {
+		t.Fatal(err)
+	}
+	service := Service{Store: store, Now: func() time.Time { return now.Add(runnerClaimTimeout) }}
+	expired, changed, err := service.ExpireUnclaimedDispatch(context.Background(), job.ProjectID, job.ApplicationID, job.ID)
+	if err != nil || !changed || expired.Status != StatusFailed || expired.FailureCode != "RUNNER_CLAIM_TIMEOUT" {
+		t.Fatalf("job=%+v changed=%t err=%v", expired, changed, err)
+	}
+	var state, code string
+	if err := db.QueryRow(`SELECT last_state,COALESCE(failure_code,'') FROM build_executor_attempts WHERE attempt_id=$1`, attempt.AttemptID).Scan(&state, &code); err != nil || state != DispatchStateRejected || code != "RUNNER_CLAIM_TIMEOUT" {
+		t.Fatalf("state=%s code=%s err=%v", state, code, err)
+	}
+}
+
 func TestPostgresBuildJobIdempotencyImmutabilityAndQueryableSchema(t *testing.T) {
 	db := newBuildJobPostgres(t)
 	store := PostgresStore{DB: db}

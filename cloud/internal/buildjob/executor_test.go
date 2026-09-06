@@ -208,6 +208,32 @@ func TestBuildExecutorDispatchFailureDoesNotBecomeBuildFailure(t *testing.T) {
 	}
 }
 
+func TestBuildExecutorExpiresUnclaimedDispatch(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	store := NewMemoryStore()
+	job := executorTestJob("job-claim-timeout")
+	if _, _, err := store.Create(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	service := Service{Store: store, Executor: executorTestConfig(), Dispatcher: testDispatcher{}, Now: func() time.Time { return now }}
+	attempt, err := service.Dispatch(context.Background(), job.ProjectID, job.ApplicationID, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(runnerClaimTimeout)
+	expired, changed, err := service.ExpireUnclaimedDispatch(context.Background(), job.ProjectID, job.ApplicationID, job.ID)
+	if err != nil || !changed || expired.Status != StatusFailed || expired.FailureCode != "RUNNER_CLAIM_TIMEOUT" || expired.FailureCause != "executor" {
+		t.Fatalf("job=%+v changed=%t err=%v", expired, changed, err)
+	}
+	storedAttempt := store.attempts[attempt.AttemptID]
+	if storedAttempt.LastState != DispatchStateRejected || storedAttempt.FailureCode != "RUNNER_CLAIM_TIMEOUT" || storedAttempt.CompletedAt == nil {
+		t.Fatalf("attempt=%+v", storedAttempt)
+	}
+	if again, changed, err := service.ExpireUnclaimedDispatch(context.Background(), job.ProjectID, job.ApplicationID, job.ID); err != nil || changed || again.Status != StatusFailed {
+		t.Fatalf("idempotency job=%+v changed=%t err=%v", again, changed, err)
+	}
+}
+
 func executorTestConfig() ExecutorConfig {
 	return ExecutorConfig{Owner: "opsi", Repository: "executor", Workflow: ".github/workflows/opsi-build-executor.yml", Ref: "refs/heads/main"}
 }

@@ -74,6 +74,56 @@ func (s PostgresStore) RejectDispatch(ctx context.Context, attemptID, code strin
 	return nil
 }
 
+func (s PostgresStore) ExpireUnclaimedDispatch(ctx context.Context, projectID, applicationID, jobID string, cutoff, now time.Time) (Job, bool, error) {
+	if s.DB == nil {
+		return Job{}, false, unavailable()
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return Job{}, false, unavailable()
+	}
+	defer tx.Rollback()
+	job, err := scanJob(tx.QueryRowContext(ctx, selectJobColumns+` WHERE project_id=$1 AND application_id=$2 AND id=$3 FOR UPDATE`, projectID, applicationID, jobID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Job{}, false, Error{Code: "BUILD_JOB_NOT_FOUND", Status: 404, Message: "BuildJob was not found.", Cause: "build_job"}
+	}
+	if err != nil {
+		return Job{}, false, unavailable()
+	}
+	if job.Status != StatusReady {
+		if err := tx.Commit(); err != nil {
+			return Job{}, false, unavailable()
+		}
+		return job, false, nil
+	}
+	attempt, err := scanAttempt(tx.QueryRowContext(ctx, `SELECT `+selectAttemptColumns+` FROM build_executor_attempts WHERE build_job_id=$1 AND last_state='dispatched' AND dispatched_at <= $2 ORDER BY dispatched_at ASC,attempt_id ASC LIMIT 1 FOR UPDATE`, jobID, cutoff))
+	if errors.Is(err, sql.ErrNoRows) {
+		if err := tx.Commit(); err != nil {
+			return Job{}, false, unavailable()
+		}
+		return job, false, nil
+	}
+	if err != nil {
+		return Job{}, false, unavailable()
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE build_executor_attempts SET last_state='dispatch_rejected',failure_code='RUNNER_CLAIM_TIMEOUT',completed_at=$2,updated_at=$2 WHERE attempt_id=$1 AND last_state='dispatched'`, attempt.AttemptID, now); err != nil {
+		return Job{}, false, unavailable()
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE build_jobs SET status='failed',failure_code='RUNNER_CLAIM_TIMEOUT',failure_message_redacted='The build executor did not claim its dispatched job before the deadline.',failure_cause='executor',completed_at=$2,updated_at=$2 WHERE id=$1 AND status='ready'`, job.ID, now); err != nil {
+		return Job{}, false, unavailable()
+	}
+	if err := tx.Commit(); err != nil {
+		return Job{}, false, unavailable()
+	}
+	job.Status = StatusFailed
+	job.FailureCode = "RUNNER_CLAIM_TIMEOUT"
+	job.FailureMessageRedacted = "The build executor did not claim its dispatched job before the deadline."
+	job.FailureCause = "executor"
+	job.CompletedAt = &now
+	job.UpdatedAt = now
+	return job, true, nil
+}
+
 func (s PostgresStore) ClaimDispatch(ctx context.Context, jobID, attemptID string, identity RunnerIdentity, leaseHash []byte, expiresAt, now time.Time) error {
 	if s.DB == nil {
 		return unavailable()

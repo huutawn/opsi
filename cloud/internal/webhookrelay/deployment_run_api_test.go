@@ -603,6 +603,7 @@ func TestDuplicateActiveBuildDispatchRemainsPending(t *testing.T) {
 	server.BuildJobs = buildjob.Service{
 		Store: store, Sources: existingBuildSource{}, Repository: existingBuildRepository{}, Dispatcher: existingBuildDispatcher{},
 		Executor: buildjob.ExecutorConfig{Owner: "opsi", Repository: "executor", Workflow: ".github/workflows/build.yml", Ref: "refs/heads/main"},
+		Now:      func() time.Time { return now },
 	}
 	result, err := (deploymentWorkflowExecutor{server: server}).build(t.Context(), run)
 	if err != nil || !result.Pending || result.FailureCode != "" || len(result.Refs.IDs(deploymentworkflow.AuthorityBuildJob)) != 1 {
