@@ -576,7 +576,7 @@ test("multi-app runtime configuration enforces review gating, generated key suff
 	await expect(page.getByText('Review required: "identity-web" requires runtime configuration or confirmation.')).toHaveCount(0);
 });
 
-test("removing the last runtime key forces confirmation review again and blocks save", async ({ page }) => {
+test("removing the last runtime key forces confirmation review again but still permits saving the draft", async ({ page }) => {
 	const run = deploymentRun("awaiting_approval");
 	run.plan.applications[1].environment = { FEATURE_FLAG: "true" };
 	run.plan.application_environment_reviews = [];
@@ -591,7 +591,33 @@ test("removing the last runtime key forces confirmation review again and blocks 
 
 	await webRuntime.getByRole("button", { name: "Remove" }).click();
 	await expect(webRuntime.getByText("Needs review")).toBeVisible();
-	await expect(page.getByRole("button", { name: "Save Draft" })).toBeDisabled();
+	await expect(page.getByRole("button", { name: "Save Draft" })).toBeEnabled();
+});
+
+test("review confirmations can be saved from awaiting input instead of re-analyzing", async ({ page }) => {
+	let run = deploymentRun("awaiting_input");
+	run.plan.application_environment_reviews = [];
+	run.plan.resources = [{ logical_name: "kafka", type: "kafka", managed: true, required: true, acknowledgements: [], confidence: "high", reason: "Kafka", evidence: [] }];
+	let saved = false;
+	await mockDeployAPI(page, () => run, () => run, "owner", undefined, {
+		repository: () => sourceRepository("active"),
+		onPlanUpdate: (body) => {
+			saved = true;
+			run = { ...run, revision: run.revision + 1, state: "awaiting_approval", plan: body.plan as DeploymentRun["plan"] };
+			return run;
+		},
+	});
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await expect(page.getByRole("button", { name: "Analyze again" })).toHaveCount(0);
+	const runtime = page.locator("#application-runtime-1");
+	await runtime.getByLabel("This application does not require environment variables or secrets.").check();
+	await page.getByLabel("I acknowledge this is an experimental single-node Kafka without HA or backup").check();
+	await expect(page.getByRole("button", { name: "Save Draft" })).toBeEnabled();
+	await expect(page.getByRole("button", { name: "Save review changes" })).toBeEnabled();
+	await page.getByRole("button", { name: "Save review changes" }).click();
+	await expect.poll(() => saved).toBe(true);
+	await expect(page.getByRole("button", { name: "Approve & Deploy" })).toBeEnabled();
 });
 
 test("plain environment blocks secret-like names and directs to Add secret", async ({ page }) => {

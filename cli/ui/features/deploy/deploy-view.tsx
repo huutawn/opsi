@@ -372,6 +372,10 @@ function PrimaryAction({ bootstrapActive, busy, canMutate, connectTrigger, draft
   let newDeployment = false;
   let saveDraftFirst = false;
   if (run.state === "awaiting_input" && needsServer) label = bootstrapActive ? "Connecting server…" : "Connect server";
+  else if (run.state === "awaiting_input" && draftDirty) { label = "Save review changes"; saveDraftFirst = true; }
+  else if (run.state === "awaiting_input" && hasUnreviewed) {
+    return <div className="sticky bottom-4 z-10 border border-status-warning/40 bg-status-warning/10 p-4 text-sm text-on-surface" role="status">Review the required application configuration and managed-resource acknowledgement above. Saving the completed review will continue to approval.</div>;
+  }
   else if (run.state === "awaiting_input" || run.state === "stale") { label = "Analyze again"; action = "analyze"; }
   else if (run.state === "awaiting_approval" && draftDirty) { label = "Save changes before approval"; saveDraftFirst = true; }
   else if (run.state === "awaiting_approval") { label = "Approve & Deploy"; action = "approve"; body = { plan_hash: run.plan.hash }; }

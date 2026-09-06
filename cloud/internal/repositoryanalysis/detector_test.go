@@ -623,6 +623,54 @@ func TestKafkaDotNetAndSpringDialectDetection(t *testing.T) {
 	}
 }
 
+func TestKafkaTopicInitializersMergeApplicationDependencyMappings(t *testing.T) {
+	result := analyze(t, memoryRepository{
+		"compose.yaml": `services:
+  kafka:
+    image: apache/kafka:4.3.1
+  kafka-init-reminder:
+    image: apache/kafka:4.3.1
+    depends_on: [kafka]
+    entrypoint: ["/opt/kafka/bin/kafka-topics.sh"]
+    command: ["--bootstrap-server", "kafka:9092", "--create", "--topic", "calendar.reminder-due.v2", "--partitions", "3", "--replication-factor", "1"]
+  kafka-init-notifications:
+    image: apache/kafka:4.3.1
+    depends_on: [kafka]
+    entrypoint: ["/opt/kafka/bin/kafka-topics.sh"]
+    command: ["--bootstrap-server", "kafka:9092", "--create", "--topic", "calendar.notification-batch.v1", "--partitions", "6", "--replication-factor", "1"]
+  api:
+    build: {context: api, dockerfile: Dockerfile}
+    depends_on: [kafka-init-reminder, kafka-init-notifications]
+    environment:
+      Kafka__BootstrapServers: kafka:9092
+      Kafka__SecurityProtocol: PLAINTEXT
+`,
+		"api/Dockerfile": "FROM scratch\nEXPOSE 8080\n",
+	})
+
+	var kafkaDependencies []Dependency
+	for _, dependency := range result.Dependencies {
+		if dependency.To == "kafka" && dependency.Protocol == "kafka" {
+			kafkaDependencies = append(kafkaDependencies, dependency)
+		}
+	}
+	if len(kafkaDependencies) != 1 {
+		t.Fatalf("expected one canonical application → kafka dependency, got: %+v (all dependencies: %+v)", kafkaDependencies, result.Dependencies)
+	}
+	seen := map[string]bool{}
+	for _, injection := range kafkaDependencies[0].Injections {
+		if seen[injection.EnvironmentName] {
+			t.Fatalf("duplicate generated Kafka environment mapping: %+v", kafkaDependencies[0].Injections)
+		}
+		seen[injection.EnvironmentName] = true
+	}
+	for _, name := range []string{"Kafka__BootstrapServers", "Kafka__SecurityProtocol"} {
+		if !seen[name] {
+			t.Fatalf("missing Kafka mapping %s in %+v", name, kafkaDependencies[0].Injections)
+		}
+	}
+}
+
 func TestKafkaTopicInitIsImportedWithoutExecutingCompose(t *testing.T) {
 	result := analyze(t, memoryRepository{
 		"compose.yaml": `services:

@@ -150,7 +150,7 @@ export function PlanReview({ canEdit, dirty, onPlan, onProposal, onResolveSecret
         <div className="flex flex-wrap items-center gap-2">
           {onProposal && <Button onClick={onProposal} type="button" variant="outline"><Icon name="tune" />Resource proposal</Button>}
           <Button
-            disabled={!canEdit || saving || !dirty || quotaBlocked || Boolean(publicSubdomainError) || deploymentMappingError(plan.dependencies) || hasUnreviewed}
+            disabled={!canEdit || saving || !dirty || quotaBlocked || Boolean(publicSubdomainError) || deploymentMappingError(plan.dependencies)}
             onClick={onSave}
           >
             Save Draft

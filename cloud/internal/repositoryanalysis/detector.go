@@ -209,6 +209,7 @@ func (d Detector) Analyze(ctx context.Context, request Request) (Result, error) 
 	canonicalizeResult(request.Repository, &result)
 	enrichApplications(&result, fileSet, read)
 	inferDependencies(&result, analysisFiles, read)
+	mergeManagedDependencies(&result)
 	validateDetected(&result)
 	if len(truncationReasons) > 0 {
 		result.Truncated = true
