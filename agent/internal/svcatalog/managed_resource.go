@@ -19,6 +19,8 @@ import (
 
 const managedResourceFieldManager = "opsi-p07b1-managed-resource"
 
+const defaultManagedResourceReadinessTimeout = time.Duration(resourcev1.ManagedResourceReadinessTimeoutSeconds) * time.Second
+
 type ManagedResourceReconciler struct {
 	Runner       deploy.CommandRunner
 	KubectlPath  string
@@ -195,10 +197,7 @@ func (r ManagedResourceReconciler) delete(ctx context.Context, spec resourcev1.M
 }
 
 func (r ManagedResourceReconciler) waitReady(ctx context.Context, spec resourcev1.ManagedResourceSpec) (*resourcev1.ManagedResourceEvidence, error) {
-	timeout := r.Timeout
-	if timeout <= 0 {
-		timeout = 3 * time.Minute
-	}
+	timeout := r.readinessTimeout()
 	interval := r.PollInterval
 	if interval <= 0 {
 		interval = 2 * time.Second
@@ -245,6 +244,13 @@ func (r ManagedResourceReconciler) waitReady(ctx context.Context, spec resourcev
 		case <-ticker.C:
 		}
 	}
+}
+
+func (r ManagedResourceReconciler) readinessTimeout() time.Duration {
+	if r.Timeout > 0 {
+		return r.Timeout
+	}
+	return defaultManagedResourceReadinessTimeout
 }
 
 func (r ManagedResourceReconciler) observe(ctx context.Context, spec resourcev1.ManagedResourceSpec) (*resourcev1.ManagedResourceEvidence, error) {

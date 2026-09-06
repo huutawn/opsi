@@ -195,7 +195,6 @@ export function DeployView({ console }: { console: ConsoleController }) {
           };
         }
       }
-      setDraftPlan(updatedPlan);
       const updatedRun = await client.updateDeploymentPlan(
         projectID,
         run.id,
@@ -213,7 +212,8 @@ export function DeployView({ console }: { console: ConsoleController }) {
       const failure = deployFailure(cause);
       if (failure.code === "RESOURCE_RECOMMENDATION_STALE") {
         setRecError("Resource recommendation is stale because cluster topology or capacity changed. Loading refreshed proposal…");
-        void loadRecommendation(true);
+        await load(true);
+        await loadRecommendation(true);
       } else {
         setError(failure);
       }

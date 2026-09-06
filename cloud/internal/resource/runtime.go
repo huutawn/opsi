@@ -16,7 +16,10 @@ import (
 	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
 )
 
-const managedLeaseTTL = 2 * time.Minute
+// A managed-resource lease must outlive the Agent's bounded cold-start
+// readiness window. The additional margin covers result delivery without
+// permitting an unbounded authority claim.
+const managedLeaseTTL = time.Duration(resourcev1.ManagedResourceReadinessTimeoutSeconds)*time.Second + 2*time.Minute
 
 type RuntimeTargetResolver interface {
 	ResolveManagedResourceTargetForType(context.Context, string, string, string, resourcev1.Type) (resourcev1.ManagedResourceAssignment, error)

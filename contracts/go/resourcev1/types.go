@@ -184,6 +184,10 @@ type KafkaTopic struct {
 const ManagedResourceSpecSchemaVersion = "opsi.managed_resource_spec/v1"
 
 const (
+	// ManagedResourceReadinessTimeoutSeconds bounds a cold-start reconcile while
+	// a fresh node pulls the provisioner and managed-service images.
+	ManagedResourceReadinessTimeoutSeconds = 8 * 60
+
 	FailureProvisioningUnsupported      = "MANAGED_RESOURCE_PROVISIONING_UNSUPPORTED"
 	FailureUnplaced                     = "MANAGED_RESOURCE_UNPLACED"
 	FailureAssignmentInvalid            = "MANAGED_RESOURCE_ASSIGNMENT_INVALID"

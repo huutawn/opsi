@@ -18,6 +18,13 @@ func (staticTarget) ResolveManagedResourceTargetForType(context.Context, string,
 	return resourcev1.ManagedResourceAssignment{RuntimeID: "runtime-1", NodeID: "node-1", AgentID: "agent-1"}, nil
 }
 
+func TestManagedLeaseOutlivesBoundedReadinessWindow(t *testing.T) {
+	readiness := time.Duration(resourcev1.ManagedResourceReadinessTimeoutSeconds) * time.Second
+	if managedLeaseTTL != readiness+2*time.Minute {
+		t.Fatalf("managed lease TTL=%s, readiness=%s", managedLeaseTTL, readiness)
+	}
+}
+
 func TestNATSCompilerLeaseReadinessDeleteAndBinding(t *testing.T) {
 	service := testService()
 	request := managedRequest(resourcev1.TypeNATS)

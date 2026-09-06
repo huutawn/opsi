@@ -118,6 +118,8 @@ test("Resource allocation proposal dialog and recommendation API integration", a
   assert.match(dialogSource, /projection\.system_reserve\.cpu_millicores/);
   assert.match(dialogSource, /projection\.available_for_run\.cpu_millicores/);
   assert.match(dialogSource, /projection\.remaining_after_proposal\.cpu_millicores/);
+	assert.match(dialogSource, /This proposal is already applied to the draft/);
+	assert.match(dialogSource, /alreadyApplied/);
 
   // Plan review separate request & limit inputs
   for (const label of ["CPU request (m)", "CPU limit (m)", "Memory request (MiB)", "Memory limit (MiB)", "Resource proposal"]) {

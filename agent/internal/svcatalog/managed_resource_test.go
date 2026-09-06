@@ -93,6 +93,15 @@ func TestManagedResourceReconcileIsIdempotentReadyAndOwnedDelete(t *testing.T) {
 	}
 }
 
+func TestManagedResourceReadinessTimeoutHasBoundedColdStartDefault(t *testing.T) {
+	if got := (ManagedResourceReconciler{}).readinessTimeout(); got != 8*time.Minute {
+		t.Fatalf("default readiness timeout=%s", got)
+	}
+	if got := (ManagedResourceReconciler{Timeout: time.Second}).readinessTimeout(); got != time.Second {
+		t.Fatal("explicit readiness timeout must remain configurable for tests and operators")
+	}
+}
+
 func TestManagedResourceDeleteRejectsForeignOwnership(t *testing.T) {
 	spec := managedSpec(t)
 	objects := managedResourceObjects(spec, nil)
