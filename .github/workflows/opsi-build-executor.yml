@@ -79,7 +79,7 @@ jobs:
           try:
               with open(os.environ["VERIFY_RESPONSE"], encoding="utf-8") as source:
                   value = json.load(source)
-              candidate = value.get("code", "")
+              candidate = value.get("error_code", "")
               if candidate in allowed:
                   code = candidate
           except (OSError, ValueError, AttributeError):
@@ -180,7 +180,7 @@ jobs:
           try:
               with open(os.environ["CLAIM_RESPONSE"], encoding="utf-8") as source:
                   value = json.load(source)
-              candidate = value.get("code", "")
+              candidate = value.get("error_code", "")
               if candidate in allowed:
                   code = candidate
           except (OSError, ValueError, AttributeError):
