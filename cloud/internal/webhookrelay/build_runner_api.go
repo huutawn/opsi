@@ -1,6 +1,7 @@
 package webhookrelay
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -44,17 +45,9 @@ func (s *Server) handleBuildRunnerClaim(w http.ResponseWriter, r *http.Request) 
 	if !decodeStrictRunnerJSON(w, r, &request, buildjob.Error{Code: "RUNNER_CLAIM_INVALID", Status: 400, Message: "Runner claim is invalid.", Cause: "request"}) {
 		return
 	}
-	if request.OIDCToken == "" {
-		writeBuildJobFailure(w, r, buildjob.Error{Code: "OIDC_MISSING", Status: 401, Message: "GitHub OIDC token is required.", Cause: "oidc"})
-		return
-	}
-	if s.RunnerOIDC == nil || s.runnerOIDCInitError != nil {
-		writeBuildJobFailure(w, r, buildjob.Error{Code: "OIDC_UNAVAILABLE", Status: 503, Message: "GitHub OIDC verification is unavailable.", Cause: "oidc"})
-		return
-	}
-	identity, err := s.RunnerOIDC.Verify(r.Context(), request.OIDCToken)
+	identity, err := s.verifyRunnerOIDC(r.Context(), request.OIDCToken)
 	if err != nil {
-		writeBuildJobFailure(w, r, runnerOIDCError(err))
+		writeBuildJobFailure(w, r, err)
 		return
 	}
 	lease, err := s.BuildJobs.Claim(r.Context(), request.BuildJobID, request.AttemptID, runnerIdentity(identity))
@@ -64,6 +57,42 @@ func (s *Server) handleBuildRunnerClaim(w http.ResponseWriter, r *http.Request) 
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, lease)
+}
+
+// handleBuildRunnerVerify validates an Actions OIDC token before the workflow
+// spends time preparing its isolated build toolchain. It creates no lease and
+// cannot alter a BuildJob or dispatch attempt.
+func (s *Server) handleBuildRunnerVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var request struct {
+		OIDCToken string `json:"oidc_token"`
+	}
+	if !decodeStrictRunnerJSON(w, r, &request, buildjob.Error{Code: "RUNNER_OIDC_VERIFY_INVALID", Status: 400, Message: "Runner OIDC verification is invalid.", Cause: "request"}) {
+		return
+	}
+	if _, err := s.verifyRunnerOIDC(r.Context(), request.OIDCToken); err != nil {
+		writeBuildJobFailure(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) verifyRunnerOIDC(ctx context.Context, token string) (githuboidc.VerifiedIdentity, error) {
+	if token == "" {
+		return githuboidc.VerifiedIdentity{}, buildjob.Error{Code: "OIDC_MISSING", Status: http.StatusUnauthorized, Message: "GitHub OIDC token is required.", Cause: "oidc"}
+	}
+	if s.RunnerOIDC == nil || s.runnerOIDCInitError != nil {
+		return githuboidc.VerifiedIdentity{}, buildjob.Error{Code: "OIDC_UNAVAILABLE", Status: http.StatusServiceUnavailable, Message: "GitHub OIDC verification is unavailable.", Cause: "oidc"}
+	}
+	identity, err := s.RunnerOIDC.Verify(ctx, token)
+	if err != nil {
+		return githuboidc.VerifiedIdentity{}, runnerOIDCError(err)
+	}
+	return identity, nil
 }
 
 func (s *Server) handleBuildRunnerSourceAccess(w http.ResponseWriter, r *http.Request) {

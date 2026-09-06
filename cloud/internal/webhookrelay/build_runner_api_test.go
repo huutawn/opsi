@@ -84,6 +84,13 @@ func TestBuildRunnerClaimAndBuildSpecAPI(t *testing.T) {
 	server.RunnerOIDC = runnerAPIVerifier{identity: githuboidc.VerifiedIdentity{Repository: config.RepositoryFullName(), WorkflowRef: config.WorkflowRef(), Ref: config.Ref, EventName: "workflow_dispatch", RunID: 99, RunAttempt: 1}}
 	server.runnerOIDCInitError = nil
 	handler := server.Handler()
+	verifyBody, _ := json.Marshal(map[string]string{"oidc_token": "signed.jwt.value"})
+	verify := httptest.NewRequest(http.MethodPost, "/v1/build-runner/verify", bytes.NewReader(verifyBody))
+	verifyResponse := httptest.NewRecorder()
+	handler.ServeHTTP(verifyResponse, verify)
+	if verifyResponse.Code != http.StatusNoContent || verifyResponse.Body.Len() != 0 || verifyResponse.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("verify status=%d body=%s", verifyResponse.Code, verifyResponse.Body.String())
+	}
 
 	claimBody, _ := json.Marshal(map[string]string{"build_job_id": job.ID, "attempt_id": attempt.AttemptID, "oidc_token": "signed.jwt.value"})
 	claim := httptest.NewRequest(http.MethodPost, "/v1/build-runner/claim", bytes.NewReader(claimBody))
@@ -151,11 +158,11 @@ func TestBuildRunnerOIDCErrorsDoNotReflectCredentials(t *testing.T) {
 		body string
 		code string
 	}{
-		"missing": {`{"build_job_id":"job-1","attempt_id":"attempt-1","oidc_token":""}`, "OIDC_MISSING"},
-		"invalid": {`{"build_job_id":"job-1","attempt_id":"attempt-1","oidc_token":"super-secret-jwt"}`, "OIDC_INVALID"},
+		"missing": {`{"oidc_token":""}`, "OIDC_MISSING"},
+		"invalid": {`{"oidc_token":"super-secret-jwt"}`, "OIDC_INVALID"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			request := httptest.NewRequest(http.MethodPost, "/v1/build-runner/claim", strings.NewReader(test.body))
+			request := httptest.NewRequest(http.MethodPost, "/v1/build-runner/verify", strings.NewReader(test.body))
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, request)
 			if response.Code != http.StatusUnauthorized || !strings.Contains(response.Body.String(), test.code) || strings.Contains(response.Body.String(), "super-secret-jwt") {

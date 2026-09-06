@@ -38,6 +38,56 @@ jobs:
             printf 'OPSI_EXECUTOR_WORKSPACE=%s\n' "$workspace"
             printf 'OPSI_EXECUTOR_OUTPUT=%s\n' "$output"
           } >> "$GITHUB_ENV"
+      - name: Verify GitHub OIDC access to Cloud
+        env:
+          OPSI_CLOUD_URL: ${{ vars.OPSI_CLOUD_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "$OPSI_CLOUD_URL"
+          OPSI_CLOUD_URL="${OPSI_CLOUD_URL%/}"
+          case "$OPSI_CLOUD_URL" in https://*) ;; *) echo "OPSI_CLOUD_URL must use HTTPS" >&2; exit 1;; esac
+          verify_dir="$(mktemp -d)"
+          trap 'rm -rf "$verify_dir"' EXIT
+          curl_args=(--fail-with-body --silent --show-error --connect-timeout 10 --max-time 30)
+          curl "${curl_args[@]}" \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=opsi-build" \
+            -o "$verify_dir/oidc.json"
+          OIDC_FILE="$verify_dir/oidc.json" VERIFY_FILE="$verify_dir/verify.json" python3 - <<'PY'
+          import json, os
+          with open(os.environ["OIDC_FILE"], encoding="utf-8") as source:
+              token = json.load(source)["value"]
+          with open(os.environ["VERIFY_FILE"], "w", encoding="utf-8") as target:
+              json.dump({"oidc_token": token}, target)
+          PY
+          if ! curl "${curl_args[@]}" \
+            -H "Content-Type: application/json" \
+            --data-binary "@$verify_dir/verify.json" \
+            "$OPSI_CLOUD_URL/v1/build-runner/verify" \
+            -o "$verify_dir/response.json"; then
+            VERIFY_RESPONSE="$verify_dir/response.json" python3 - <<'PY'
+          import json, os, sys
+          allowed = {
+              "OIDC_AUDIENCE_INVALID", "OIDC_CLAIMS_INVALID", "OIDC_EXP_INVALID",
+              "OIDC_IAT_INVALID", "OIDC_INVALID", "OIDC_ISSUER_INVALID",
+              "OIDC_MISSING", "OIDC_NBF_INVALID", "OIDC_SIGNATURE_INVALID",
+              "OIDC_TIME_INVALID", "OIDC_TOKEN_INVALID", "OIDC_UNAVAILABLE",
+          }
+          code = "BUILD_RUNNER_OIDC_VERIFY_FAILED"
+          try:
+              with open(os.environ["VERIFY_RESPONSE"], encoding="utf-8") as source:
+                  value = json.load(source)
+              candidate = value.get("code", "")
+              if candidate in allowed:
+                  code = candidate
+          except (OSError, ValueError, AttributeError):
+              pass
+          print("build-runner OIDC verification rejected: " + code, file=sys.stderr)
+          PY
+            exit 1
+          fi
       - name: Check out immutable executor source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -130,7 +180,7 @@ jobs:
           try:
               with open(os.environ["CLAIM_RESPONSE"], encoding="utf-8") as source:
                   value = json.load(source)
-              candidate = value.get("error", {}).get("code", "")
+              candidate = value.get("code", "")
               if candidate in allowed:
                   code = candidate
           except (OSError, ValueError, AttributeError):
