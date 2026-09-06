@@ -574,6 +574,48 @@ func TestConnectionStateFailsClosedAfterCloudError(t *testing.T) {
 	}
 }
 
+type deadlineCapturingClient struct {
+	fakeClient
+	heartbeatDeadline time.Time
+	pollDeadline      time.Time
+}
+
+func (c *deadlineCapturingClient) Heartbeat(ctx context.Context, _ string, _ cloudrelay.Heartbeat) error {
+	var ok bool
+	c.heartbeatDeadline, ok = ctx.Deadline()
+	if !ok {
+		return errors.New("heartbeat context has no deadline")
+	}
+	return nil
+}
+
+func (c *deadlineCapturingClient) PollJob(ctx context.Context, _ string, _ time.Duration) (*cloudrelay.JobLease, error) {
+	var ok bool
+	c.pollDeadline, ok = ctx.Deadline()
+	if !ok {
+		return nil, errors.New("poll context has no deadline")
+	}
+	c.cancel()
+	return nil, context.Canceled
+}
+
+func TestRunnerBoundsHeartbeatAndLongPollRequests(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &deadlineCapturingClient{fakeClient: fakeClient{cancel: cancel}}
+	runner := Runner{Client: client, Engine: &fakeRolloutEngine{}, NodeID: "node-1", PollInterval: time.Millisecond, LongPollWait: 30 * time.Second, HeartbeatInterval: time.Hour}
+	started := time.Now()
+	if err := runner.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("run err=%v", err)
+	}
+	if heartbeatRemaining := client.heartbeatDeadline.Sub(started); heartbeatRemaining <= 0 || heartbeatRemaining > cloudHeartbeatTimeout+time.Second {
+		t.Fatalf("heartbeat deadline remaining=%s", heartbeatRemaining)
+	}
+	wantPollTimeout := runner.LongPollWait + cloudPollTimeoutMargin
+	if pollRemaining := client.pollDeadline.Sub(started); pollRemaining < runner.LongPollWait-time.Second || pollRemaining > wantPollTimeout+time.Second {
+		t.Fatalf("poll deadline remaining=%s", pollRemaining)
+	}
+}
+
 func TestHeartbeatHealthAndCapabilitiesFailClosed(t *testing.T) {
 	tests := []struct {
 		name          string
