@@ -18,21 +18,25 @@ const (
 	ProtocolPostgres = "postgres"
 	ProtocolRedis    = "redis"
 	ProtocolNATS     = "nats"
+	ProtocolKafka    = "kafka"
 
-	SourceResourceHost       = "resource.host"
-	SourceResourcePort       = "resource.port"
-	SourceCredentialDatabase = "credential.database"
-	SourceCredentialUsername = "credential.username"
-	SourceCredentialPassword = "credential.password"
-	SourceConnectionURL      = "connection.url"
-	SourcePostgresURI        = "connection.postgres.uri"
-	SourcePostgresNpgsql     = "connection.postgres.npgsql"
-	SourcePostgresJDBC       = "connection.postgres.jdbc"
-	SourcePostgresPDODSN     = "connection.postgres.pdo_dsn"
-	SourceRedisURI           = "connection.redis.uri"
-	SourceRedisStackExchange = "connection.redis.stackexchange"
-	SourceNATSURI            = "connection.nats.uri"
-	SourceConnectionTemplate = "connection.template"
+	SourceResourceHost          = "resource.host"
+	SourceResourcePort          = "resource.port"
+	SourceCredentialDatabase    = "credential.database"
+	SourceCredentialUsername    = "credential.username"
+	SourceCredentialPassword    = "credential.password"
+	SourceConnectionURL         = "connection.url"
+	SourcePostgresURI           = "connection.postgres.uri"
+	SourcePostgresNpgsql        = "connection.postgres.npgsql"
+	SourcePostgresJDBC          = "connection.postgres.jdbc"
+	SourcePostgresPDODSN        = "connection.postgres.pdo_dsn"
+	SourceRedisURI              = "connection.redis.uri"
+	SourceRedisStackExchange    = "connection.redis.stackexchange"
+	SourceNATSURI               = "connection.nats.uri"
+	SourceKafkaBootstrapServers = "connection.kafka.bootstrap_servers"
+	SourceKafkaSecurityProtocol = "connection.kafka.security_protocol"
+	SourceKafkaSASLMechanism    = "connection.kafka.sasl_mechanism"
+	SourceConnectionTemplate    = "connection.template"
 
 	SourceApplicationInternalURL  = "application.internal_url"
 	SourceApplicationInternalHost = "application.internal_host"
@@ -176,6 +180,25 @@ func PublicHTTPPreset(logicalName, targetIdentity, accessContext, envName string
 		InjectionPhase: InjectionPhaseRuntime,
 		InjectionMappings: []DependencyInjectionMapping{
 			{EnvName: envName, SymbolicSource: SourceApplicationPublicURL},
+		},
+	}
+}
+
+// KafkaStandardPreset creates an ApplicationDependency configured with KAFKA_* environment mappings.
+func KafkaStandardPreset(logicalName, targetIdentity string, required bool) ApplicationDependency {
+	return ApplicationDependency{
+		LogicalName:    logicalName,
+		TargetKind:     TargetKindManagedResource,
+		TargetIdentity: targetIdentity,
+		Protocol:       ProtocolKafka,
+		Required:       required,
+		InjectionPhase: InjectionPhaseRuntime,
+		InjectionMappings: []DependencyInjectionMapping{
+			{EnvName: "KAFKA_BOOTSTRAP_SERVERS", SymbolicSource: SourceKafkaBootstrapServers},
+			{EnvName: "KAFKA_SECURITY_PROTOCOL", SymbolicSource: SourceKafkaSecurityProtocol},
+			{EnvName: "KAFKA_SASL_MECHANISM", SymbolicSource: SourceKafkaSASLMechanism},
+			{EnvName: "KAFKA_SASL_USERNAME", SymbolicSource: SourceCredentialUsername},
+			{EnvName: "KAFKA_SASL_PASSWORD", SymbolicSource: SourceCredentialPassword},
 		},
 	}
 }

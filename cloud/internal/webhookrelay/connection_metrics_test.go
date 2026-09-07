@@ -44,7 +44,7 @@ func TestConnectionCompileMetricsUseOnlyStableErrorCodes(t *testing.T) {
 		return fmt.Errorf("runtime compilation: %w", err)
 	}
 	errorsByCode := map[string]error{
-		resourcecompiler.ErrorUnsupportedProtocol:  compile("kafka", serviceconfigurationv1.SourceConnectionTemplate, "password=metric-secret", resourcecompiler.ConnectionFacts{}),
+		resourcecompiler.ErrorUnsupportedProtocol:  compile("cassandra", serviceconfigurationv1.SourceConnectionTemplate, "password=metric-secret", resourcecompiler.ConnectionFacts{}),
 		resourcecompiler.ErrorUnsupportedSource:    compile("postgres", serviceconfigurationv1.SourceRedisURI, "", resourcecompiler.ConnectionFacts{}),
 		resourcecompiler.ErrorInvalidTemplate:      compile("postgres", serviceconfigurationv1.SourceConnectionTemplate, "password=metric-secret", resourcecompiler.ConnectionFacts{}),
 		resourcecompiler.ErrorInvalidFact:          compile("nats", serviceconfigurationv1.SourceNATSURI, "", resourcecompiler.ConnectionFacts{Host: "bad@metric-secret", Port: "4222"}),

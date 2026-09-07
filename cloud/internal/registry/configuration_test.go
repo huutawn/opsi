@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
+	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
 )
 
@@ -167,6 +168,25 @@ func TestBrowserHTTPUsesSameOriginPathOnly(t *testing.T) {
 	}
 	if len(compiled.Environment) != 1 || compiled.Environment[0].Name != "API_BASE_URL" || compiled.Environment[0].Value != "/api" || strings.Contains(compiled.Environment[0].Value, "localhost") || strings.Contains(compiled.Environment[0].Value, "cluster.local") {
 		t.Fatalf("browser environment is not same-origin: %+v", compiled.Environment)
+	}
+}
+
+func TestSameOriginAllowsAnAppliedPublicRouteAlias(t *testing.T) {
+	source, target := configurationServices()
+	target.Configuration = appliedConfiguration(ServiceConfigurationDraft{PublicRoute: &PublicRouteIntent{Hostname: "apps.example.com", Path: "/api", AdditionalPaths: []string{"/hubs/notifications"}}})
+	draft := ServiceConfigurationDraft{
+		PublicRoute: &PublicRouteIntent{Hostname: "apps.example.com", Path: "/"},
+		Dependencies: []serviceconfigurationv1.ApplicationDependency{
+			serviceconfigurationv1.SameOriginPreset("notification-hub", target.ID, "/hubs/notifications", "NOTIFICATION_HUB_PATH", true),
+		},
+		Bindings: []ServiceBinding{{Kind: ServiceBindingBrowserHTTP, TargetServiceID: target.ID, TargetServiceKey: target.Name, Path: "/hubs/notifications"}},
+	}
+	validated, _, err := validateServiceConfiguration(context.Background(), nil, source, draft, []ServiceRecord{source, target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !validated.PublicRoute.HasPath("/") || validated.Dependencies[0].Path != "/hubs/notifications" {
+		t.Fatalf("validated=%+v", validated)
 	}
 }
 

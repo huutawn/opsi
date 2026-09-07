@@ -64,3 +64,12 @@ export function isApplicationReviewed(plan: DeploymentPlan, app: DeploymentPlan[
 export function getUnreviewedApplications(plan: DeploymentPlan): DeploymentPlan["applications"] {
   return (plan.applications || []).filter((app) => !isApplicationReviewed(plan, app));
 }
+
+export function isKafkaResourceReviewed(plan: DeploymentPlan, res: DeploymentPlan["resources"][number]): boolean {
+  if (res.type !== "kafka" || !res.managed) return true;
+  return (res.acknowledgements || []).includes("kafka_single_node_experimental");
+}
+
+export function getUnreviewedResources(plan: DeploymentPlan): DeploymentPlan["resources"] {
+  return (plan.resources || []).filter((res) => !isKafkaResourceReviewed(plan, res));
+}

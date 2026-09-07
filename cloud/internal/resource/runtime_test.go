@@ -14,8 +14,15 @@ import (
 
 type staticTarget struct{}
 
-func (staticTarget) ResolveManagedResourceTarget(context.Context, string, string, string) (resourcev1.ManagedResourceAssignment, error) {
+func (staticTarget) ResolveManagedResourceTargetForType(context.Context, string, string, string, resourcev1.Type) (resourcev1.ManagedResourceAssignment, error) {
 	return resourcev1.ManagedResourceAssignment{RuntimeID: "runtime-1", NodeID: "node-1", AgentID: "agent-1"}, nil
+}
+
+func TestManagedLeaseOutlivesBoundedReadinessWindow(t *testing.T) {
+	readiness := time.Duration(resourcev1.ManagedResourceReadinessTimeoutSeconds) * time.Second
+	if managedLeaseTTL != readiness+2*time.Minute {
+		t.Fatalf("managed lease TTL=%s, readiness=%s", managedLeaseTTL, readiness)
+	}
 }
 
 func TestNATSCompilerLeaseReadinessDeleteAndBinding(t *testing.T) {
@@ -130,6 +137,48 @@ func TestReconcileTopologyPreservesUnchangedInFlightAndReadyResource(t *testing.
 	}
 }
 
+func TestReconcileTopologyRequeuesExactFailedResourceOnly(t *testing.T) {
+	service := testService()
+	request := managedRequest(resourcev1.TypeNATS)
+	request.Managed.CredentialRefs = nil
+	created, _, err := service.Create(context.Background(), "project-1", "user-1", "nats-failed-reconcile", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := topologyv1.Plan{ProjectID: "project-1", Revision: 1, PlanHash: strings.Repeat("8", 64), Assignments: []topologyv1.Assignment{{ServiceKey: created.ID, EnvironmentID: "env-1", RuntimeID: "runtime-1", Replicas: 1, CPURequestMillicores: 250, MemoryRequestBytes: 256 << 20}}}
+	if err := service.ReconcileTopology(context.Background(), "project-1", plan, staticTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	lease, ok, err := service.LeaseManaged(context.Background(), "project-1", "node-1")
+	if err != nil || !ok {
+		t.Fatalf("lease=%+v ok=%t err=%v", lease, ok, err)
+	}
+	failed, err := service.CompleteManaged(context.Background(), "project-1", created.ID, ManagedResult{Status: "failed", LeaseToken: lease.LeaseToken, FailureCode: resourcev1.FailureReadinessFailed, FailureMessage: "image pull was delayed"})
+	if err != nil || failed.Lifecycle != resourcev1.LifecycleFailed {
+		t.Fatalf("failed=%+v err=%v", failed, err)
+	}
+	if err := service.ReconcileTopology(context.Background(), "project-1", plan, staticTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	requeued, err := service.Get(context.Background(), "project-1", created.ID)
+	if err != nil || requeued.Lifecycle != resourcev1.LifecyclePlanned || requeued.Runtime == nil || requeued.Runtime.FailureCode != "" || requeued.Runtime.FailureMessage != "" {
+		t.Fatalf("requeued=%+v err=%v", requeued, err)
+	}
+
+	requeued.Lifecycle = resourcev1.LifecycleDegraded
+	requeued.Runtime.FailureCode = resourcev1.FailureRuntimeMismatch
+	if _, err := service.Store.Update(context.Background(), requeued); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ReconcileTopology(context.Background(), "project-1", plan, staticTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	degraded, err := service.Get(context.Background(), "project-1", created.ID)
+	if err != nil || degraded.Lifecycle != resourcev1.LifecycleDegraded || degraded.Runtime.FailureCode != resourcev1.FailureRuntimeMismatch {
+		t.Fatalf("degraded=%+v err=%v", degraded, err)
+	}
+}
+
 func TestPostgresCompilerGeneratesStableCredentialAndStorageAuthority(t *testing.T) {
 	service := testService()
 	postgres, _, err := service.Create(context.Background(), "project-1", "user-1", "postgres-runtime", managedRequest(resourcev1.TypePostgres))
@@ -177,6 +226,83 @@ func TestPostgresCompilerGeneratesStableCredentialAndStorageAuthority(t *testing
 	}
 	retained, err := service.GetRetainedStorageByResource(context.Background(), "project-1", postgres.ID)
 	if err != nil || retained.PVCUID != "pvc-uid" || retained.PVUID != "pv-uid" || retained.Lifecycle != resourcev1.RetainedStorageRetained || retained.RetainedBy != "user-1" {
+		t.Fatalf("retained=%+v err=%v", retained, err)
+	}
+}
+
+func TestKafkaReadinessBindingAndRetainedStorageLifecycle(t *testing.T) {
+	service := testService()
+	created, _, err := service.Create(context.Background(), "project-1", "user-1", "kafka-runtime", managedRequest(resourcev1.TypeKafka))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindingRequest := resourcev1.CreateBindingRequest{
+		EnvironmentID: "env-1",
+		Source:        resourcev1.EndpointReference{Kind: resourcev1.KindApplication, ID: "app-1"},
+		Target:        resourcev1.EndpointReference{Kind: resourcev1.KindManagedService, ID: created.ID},
+		Protocol:      resourcev1.ProtocolKafka,
+		LogicalName:   "EVENTS",
+	}
+	if _, _, err := service.CreateBinding(context.Background(), "project-1", "kafka-before-ready", bindingRequest); err == nil || !strings.Contains(err.Error(), "RESOURCE_BINDING_TARGET_NOT_READY") {
+		t.Fatalf("unready Kafka binding error=%v", err)
+	}
+	plan := topologyv1.Plan{ProjectID: "project-1", Revision: 1, PlanHash: strings.Repeat("f", 64), Assignments: []topologyv1.Assignment{{
+		ServiceKey: created.ID, EnvironmentID: "env-1", RuntimeID: "runtime-1", Replicas: 1,
+		CPURequestMillicores: created.Managed.CPUMillicores, MemoryRequestBytes: created.Managed.MemoryBytes,
+	}}}
+	if err := service.ReconcileTopology(context.Background(), "project-1", plan, staticTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	lease, ok, err := service.LeaseManaged(context.Background(), "project-1", "node-1")
+	if err != nil || !ok || lease.Credential == nil || lease.Spec.ResourceType != resourcev1.TypeKafka {
+		t.Fatalf("lease=%+v ok=%t err=%v", lease, ok, err)
+	}
+	readyEvidence := &resourcev1.ManagedResourceEvidence{
+		ObservedSpecHash: lease.Spec.SpecHash, WorkloadReady: true, PodReady: true, ServiceReady: true,
+		SecretReady: true, AuthReady: true, StorageReady: true, VolumeMounted: true,
+		PVCName: "kafka-pvc", PVName: "kafka-pv", Image: lease.Spec.Image, ImageID: lease.Spec.Image,
+		AvailableReplicas: 1, ObservedAt: time.Now().UTC(),
+	}
+	ready, err := service.CompleteManaged(context.Background(), "project-1", created.ID, ManagedResult{Status: "ready", LeaseToken: lease.LeaseToken, Evidence: readyEvidence})
+	if err != nil || ready.Lifecycle != resourcev1.LifecycleReady {
+		t.Fatalf("ready=%+v err=%v", ready, err)
+	}
+	binding, _, err := service.CreateBinding(context.Background(), "project-1", "kafka-ready-binding", bindingRequest)
+	if err != nil || binding.Lifecycle != resourcev1.LifecycleReady || len(binding.RuntimeRefs) != 7 {
+		t.Fatalf("binding=%+v err=%v", binding, err)
+	}
+	if bindingValue(binding.RuntimeRefs, "BOOTSTRAP_SERVERS") != lease.Spec.Connection.Host+":9092" || bindingValue(binding.RuntimeRefs, "SECURITY_PROTOCOL") != "SASL_PLAINTEXT" || bindingValue(binding.RuntimeRefs, "SASL_MECHANISM") != "PLAIN" {
+		t.Fatalf("Kafka runtime references=%+v", binding.RuntimeRefs)
+	}
+	if _, err := service.DeleteIntent(context.Background(), "project-1", created.ID, "user-1"); err == nil || !strings.Contains(err.Error(), resourcev1.FailureBindingActive) {
+		t.Fatalf("resource with active Kafka binding delete error=%v", err)
+	}
+	if _, err := service.DeleteBinding(context.Background(), "project-1", binding.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.DeleteIntent(context.Background(), "project-1", created.ID, "user-1"); err != nil {
+		t.Fatal(err)
+	}
+	deleteLease, ok, err := service.LeaseManaged(context.Background(), "project-1", "node-1")
+	if err != nil || !ok || deleteLease.Action != "delete" {
+		t.Fatalf("delete lease=%+v ok=%t err=%v", deleteLease, ok, err)
+	}
+	now := time.Now().UTC()
+	deletedEvidence := &resourcev1.ManagedResourceEvidence{
+		ObservedSpecHash: deleteLease.Spec.SpecHash, Deleted: true, StorageRetained: true,
+		Namespace: "opsi-project-1-env-1", PVCName: "kafka-pvc", PVCUID: "kafka-pvc-uid",
+		PVName: "kafka-pv", PVUID: "kafka-pv-uid", StorageClass: "local-path", ReclaimPolicy: "Delete",
+		RequestedBytes: deleteLease.Spec.Storage.SizeBytes, ActualStorage: "1Gi",
+		StorageHash: resourcev1.ManagedResourceStorageHash(deleteLease.Spec), ObservedAt: now,
+	}
+	if _, err := service.CompleteManaged(context.Background(), "project-1", created.ID, ManagedResult{Status: "deleted", LeaseToken: deleteLease.LeaseToken, Evidence: deletedEvidence}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Get(context.Background(), "project-1", created.ID); err != ErrNotFound {
+		t.Fatalf("Kafka resource still exists: %v", err)
+	}
+	retained, err := service.GetRetainedStorageByResource(context.Background(), "project-1", created.ID)
+	if err != nil || retained.ResourceType != resourcev1.TypeKafka || retained.PVCUID != "kafka-pvc-uid" || retained.Lifecycle != resourcev1.RetainedStorageRetained {
 		t.Fatalf("retained=%+v err=%v", retained, err)
 	}
 }

@@ -7,14 +7,14 @@ func PlannedManagedResourceCapacity(rawType string) (int64, int64) {
 	if resourceType == "valkey" {
 		resourceType = resourcev1.TypeRedis
 	}
-	switch resourceType {
-	case resourcev1.TypePostgres:
-		return 250, 256 << 20
-	case resourcev1.TypeRedis:
-		return 100, 256 << 20
-	default:
-		return 100, 128 << 20
+	definition, ok := resourcev1.Definition(resourceType)
+	if ok && len(definition.Provisioning.Profiles) > 0 {
+		defaults := definition.Provisioning.Profiles[0].ResourceDefaults
+		if defaults != nil && defaults.CPUMillicores > 0 && defaults.MemoryBytes > 0 {
+			return defaults.CPUMillicores, defaults.MemoryBytes
+		}
 	}
+	return 100, 128 << 20
 }
 
 func plannedManagedResourceSpec(rawType string, existing resourcev1.Resource) (int64, int64, int64) {

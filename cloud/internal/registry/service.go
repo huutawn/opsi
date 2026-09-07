@@ -308,6 +308,8 @@ type BootstrapSession struct {
 	CreatedAt           time.Time           `json:"created_at"`
 	UpdatedAt           time.Time           `json:"updated_at"`
 	BootstrapCommand    string              `json:"bootstrap_command,omitempty"`
+	SSHHostKeyTrustID   string              `json:"ssh_host_key_trust_id,omitempty"`
+	ResolvedIP          string              `json:"resolved_ip,omitempty"`
 }
 
 const (
@@ -344,10 +346,13 @@ type BootstrapSessionLease struct {
 }
 
 type BootstrapFinishResult struct {
-	Status          string
-	FailureCode     string
-	MessageRedacted string
-	Retryable       bool
+	Status              string
+	FailureCode         string
+	MessageRedacted     string
+	Retryable           bool
+	ObservedAlgorithm   string
+	ObservedPublicKey   string
+	ObservedFingerprint string
 }
 
 type BootstrapRecoverySummary struct {
@@ -640,6 +645,8 @@ type Service struct {
 	githubServiceBindings   map[string]GitHubServiceBinding
 	githubWebhookDeliveries map[string]GitHubWebhookDelivery
 	proposalReviews         map[string]ProposalReview
+	sshTrusts               map[string]SSHHostKeyTrust
+	sshObservations         map[string]SSHHostKeyObservation
 	now                     func() time.Time
 }
 
@@ -662,7 +669,14 @@ type API interface {
 	RequestNodeLifecycle(projectID, targetNodeID, action, requestedBy, key, requestID string, confirmRemove, force bool) (NodeLifecycleJob, error)
 	LeaseNodeLifecycle(projectID, nodeID string) (NodeLifecycleLease, bool, error)
 	CompleteNodeLifecycle(projectID, nodeID, jobID, requestID string, result NodeLifecycleResult) (NodeLifecycleJob, error)
-	CreateBootstrapSession(projectID, role, publicHost, username, authMethod, createdBy, key string, sshPort int) (BootstrapSession, error)
+	CreateBootstrapSession(projectID, role, publicHost, username, authMethod, createdBy, key string, sshPort int, probeID string) (BootstrapSession, error)
+	CreateSSHHostKeyObservation(projectID, host string, port int, resolvedIP, algorithm, publicKey, fingerprint, createdBy string, now time.Time) (SSHHostKeyObservation, error)
+	GetSSHHostKeyObservation(projectID, observationID string) (SSHHostKeyObservation, error)
+	GetActiveSSHHostKeyTrust(projectID, host string, port int) (SSHHostKeyTrust, error)
+	GetSSHHostKeyTrust(projectID, trustID string) (SSHHostKeyTrust, error)
+	ListSSHHostKeyTrusts(projectID string) ([]SSHHostKeyTrust, error)
+	ConfirmSSHHostKeyRotation(projectID, observationID, actorID, expectedFingerprint, idempotencyKey string, now time.Time) (SSHHostKeyTrust, error)
+	ResumeBootstrapSession(projectID, sessionID, observationID, actorID, idempotencyKey string, now time.Time) (BootstrapSession, error)
 	UpdateBootstrapSession(projectID, sessionID, status, message string) (BootstrapSession, error)
 	LeaseNextBootstrapSession(workerID, sessionID string, now time.Time, leaseDuration time.Duration) (BootstrapSessionLease, bool, error)
 	RenewBootstrapLease(projectID, sessionID, workerID, rawLeaseToken string, now time.Time, leaseDuration time.Duration) (BootstrapSession, error)
@@ -739,6 +753,8 @@ func NewService() *Service {
 		githubServiceBindings:   map[string]GitHubServiceBinding{},
 		githubWebhookDeliveries: map[string]GitHubWebhookDelivery{},
 		proposalReviews:         map[string]ProposalReview{},
+		sshTrusts:               map[string]SSHHostKeyTrust{},
+		sshObservations:         map[string]SSHHostKeyObservation{},
 	}
 }
 
@@ -1284,7 +1300,7 @@ func (s *Service) CompleteNodeLifecycle(projectID, nodeID, jobID, requestID stri
 	return job, nil
 }
 
-func (s *Service) CreateBootstrapSession(projectID, role, publicHost, username, authMethod, createdBy, key string, sshPort int) (BootstrapSession, error) {
+func (s *Service) CreateBootstrapSession(projectID, role, publicHost, username, authMethod, createdBy, key string, sshPort int, probeID string) (BootstrapSession, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if got, ok := s.idempotency["bootstrap:"+projectID+":"+key].(BootstrapSession); ok {
@@ -1304,6 +1320,118 @@ func (s *Service) CreateBootstrapSession(projectID, role, publicHost, username, 
 	if err := s.validateBootstrapLocked(projectID, role, publicHost); err != nil {
 		return BootstrapSession{}, err
 	}
+
+	normHost := normalizeHost(publicHost)
+	var trustID string
+	var resolvedIP string
+
+	if authMethod != "command" && sshPort <= 0 {
+		sshPort = 22
+	}
+	if authMethod != "command" {
+		if probeID == "" {
+			return BootstrapSession{}, APIError{Status: 400, Code: "SSH_HOST_KEY_PROBE_REQUIRED", Message: "SSH host-key probe is required for SSH bootstrap"}
+		}
+		obs, ok := s.sshObservations[probeID]
+		if !ok || obs.ProjectID != projectID {
+			return BootstrapSession{}, APIError{Status: 400, Code: "SSH_HOST_KEY_PROBE_NOT_FOUND", Message: "SSH host-key probe was not found"}
+		}
+		if !now.Before(obs.ExpiresAt) {
+			return BootstrapSession{}, APIError{Status: 410, Code: "SSH_HOST_KEY_PROBE_EXPIRED", Message: "SSH host-key probe has expired"}
+		}
+		if obs.Host != normHost || obs.Port != sshPort {
+			return BootstrapSession{}, APIError{Status: 400, Code: "SSH_HOST_KEY_ENDPOINT_MISMATCH", Message: "probe endpoint does not match bootstrap session"}
+		}
+		resolvedIP = obs.ResolvedIP
+
+		switch obs.TrustState {
+		case TrustStateFirstSeen:
+			newTrust := SSHHostKeyTrust{
+				ID:          newID("trust"),
+				ProjectID:   projectID,
+				Host:        obs.Host,
+				Port:        obs.Port,
+				Algorithm:   obs.Algorithm,
+				PublicKey:   obs.PublicKey,
+				Fingerprint: obs.Fingerprint,
+				Status:      TrustStatusActive,
+				CreatedBy:   createdBy,
+				CreatedAt:   now,
+			}
+			if s.sshTrusts == nil {
+				s.sshTrusts = map[string]SSHHostKeyTrust{}
+			}
+			s.sshTrusts[newTrust.ID] = newTrust
+			trustID = newTrust.ID
+			obs.Status = ObservationStatusConsumed
+			obs.UpdatedAt = now
+			s.sshObservations[probeID] = obs
+
+			s.audit = append(s.audit, AuditEvent{
+				ID:           newID("aud"),
+				OrgID:        project.OrgID,
+				ProjectID:    projectID,
+				ActorType:    "user",
+				ActorUserID:  createdBy,
+				Action:       "SSH_HOST_KEY_AUTO_TRUSTED",
+				ResourceType: "ssh_host_key_trust",
+				ResourceID:   newTrust.ID,
+				Result:       "success",
+				MetadataRedacted: map[string]any{
+					"host":        obs.Host,
+					"port":        obs.Port,
+					"fingerprint": obs.Fingerprint,
+					"probe_id":    probeID,
+				},
+				CreatedAt: now,
+			})
+		case TrustStateMatched:
+			activeTrust, hasActive := s.getActiveTrustLocked(projectID, obs.Host, obs.Port)
+			if !hasActive || activeTrust.Fingerprint != obs.Fingerprint {
+				return BootstrapSession{}, APIError{Status: 409, Code: "SSH_HOST_KEY_ACTIVE_TRUST_MISMATCH", Message: "active host-key trust does not match observation"}
+			}
+			trustID = activeTrust.ID
+			obs.Status = ObservationStatusConsumed
+			obs.UpdatedAt = now
+			s.sshObservations[probeID] = obs
+
+			s.audit = append(s.audit, AuditEvent{
+				ID:           newID("aud"),
+				OrgID:        project.OrgID,
+				ProjectID:    projectID,
+				ActorType:    "user",
+				ActorUserID:  createdBy,
+				Action:       "SSH_HOST_KEY_MATCHED",
+				ResourceType: "ssh_host_key_trust",
+				ResourceID:   activeTrust.ID,
+				Result:       "success",
+				MetadataRedacted: map[string]any{
+					"host":        obs.Host,
+					"port":        obs.Port,
+					"fingerprint": obs.Fingerprint,
+					"probe_id":    probeID,
+				},
+				CreatedAt: now,
+			})
+		case TrustStateChanged:
+			if obs.Status != ObservationStatusConfirmed {
+				return BootstrapSession{}, APIError{Status: 409, Code: "SSH_HOST_KEY_CONFIRMATION_REQUIRED", Message: "SSH host-key has changed; confirmation is required before bootstrapping"}
+			}
+			activeTrust, hasActive := s.getActiveTrustLocked(projectID, obs.Host, obs.Port)
+			if !hasActive || activeTrust.Fingerprint != obs.Fingerprint {
+				return BootstrapSession{}, APIError{Status: 409, Code: "SSH_HOST_KEY_ACTIVE_TRUST_MISMATCH", Message: "confirmed active host-key trust does not match observation"}
+			}
+			trustID = activeTrust.ID
+			obs.Status = ObservationStatusConsumed
+			obs.UpdatedAt = now
+			s.sshObservations[probeID] = obs
+		}
+	} else {
+		if probeID != "" {
+			return BootstrapSession{}, APIError{Status: 400, Code: "BOOTSTRAP_COMMAND_PROBE_PROHIBITED", Message: "bootstrap-command flow does not accept SSH host-key probe"}
+		}
+	}
+
 	node := Node{ID: newID("node"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: publicHost, Role: roleForNode(role), Status: NodePending, PublicHost: publicHost, K3SRole: k3sRoleForBootstrap(role), CreatedAt: now, UpdatedAt: now}
 	for _, existing := range s.nodes {
 		if existing.RuntimeID == runtime.ID && existing.Name == node.Name {
@@ -1315,7 +1443,28 @@ func (s *Service) CreateBootstrapSession(projectID, role, publicHost, username, 
 	if authMethod == "command" {
 		status, step, message = BootstrapWaiting, BootstrapWaiting, "waiting for bootstrap command connection"
 	}
-	session := BootstrapSession{ID: newID("boot"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, NodeID: node.ID, CreatedBy: createdBy, Role: role, Status: status, IdempotencyKey: key, PublicHost: publicHost, SSHPort: sshPort, SSHUsername: username, AuthMethod: authMethod, ExpiresAt: now.Add(30 * time.Minute), MaxAttempts: defaultBootstrapMaxAttempts, CreatedAt: now, UpdatedAt: now}
+	session := BootstrapSession{
+		ID:                newID("boot"),
+		OrgID:             project.OrgID,
+		ProjectID:         project.ID,
+		EnvironmentID:     env.ID,
+		RuntimeID:         runtime.ID,
+		NodeID:            node.ID,
+		CreatedBy:         createdBy,
+		Role:              role,
+		Status:            status,
+		IdempotencyKey:    key,
+		PublicHost:        publicHost,
+		ResolvedIP:        resolvedIP,
+		SSHPort:           sshPort,
+		SSHUsername:       username,
+		AuthMethod:        authMethod,
+		SSHHostKeyTrustID: trustID,
+		ExpiresAt:         now.Add(30 * time.Minute),
+		MaxAttempts:       defaultBootstrapMaxAttempts,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
 	event := BootstrapEvent{ID: newID("evt"), OrgID: project.OrgID, ProjectID: project.ID, SessionID: session.ID, NodeID: node.ID, Level: "info", Step: step, MessageRedacted: message, ProgressPercent: 0, CreatedAt: now}
 	runtime.Status = RuntimeProvisioning
 	runtime.UpdatedAt = now
@@ -1327,6 +1476,7 @@ func (s *Service) CreateBootstrapSession(projectID, role, publicHost, username, 
 	s.refreshProjectLocked(project.ID)
 	return session, nil
 }
+
 
 func (s *Service) UpdateBootstrapSession(projectID, sessionID, status, message string) (BootstrapSession, error) {
 	s.mu.Lock()
@@ -2548,7 +2698,7 @@ func isActiveBootstrap(status string) bool {
 }
 
 func validBootstrapStatus(status string) bool {
-	return isActiveBootstrap(status) || isTerminalBootstrap(status) || status == "failed"
+	return isActiveBootstrap(status) || isTerminalBootstrap(status) || status == "failed" || status == BootstrapWaitingHostKeyConfirmation
 }
 
 func isLeasedBootstrapStatus(status string) bool {

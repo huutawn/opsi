@@ -14,7 +14,8 @@ func TestConcurrentBootstrapLeaseClaimsExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldest, err := service.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-1", 22)
+	probeID := seedTestProbe(t, service, project.ID, "203.0.113.10", 22)
+	oldest, err := service.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-1", 22, probeID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,9 +63,11 @@ func TestBootstrapLeaseOldestEligibleAndOwnerValidation(t *testing.T) {
 	now := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
 	project, _ := service.CreateProject("org-1", "Demo", "demo", "", "project-key")
-	oldest, _ := service.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-1", 22)
+	p1 := seedTestProbe(t, service, project.ID, "203.0.113.10", 22)
+	oldest, _ := service.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-1", 22, p1)
 	now = now.Add(time.Second)
-	_, _ = service.CreateBootstrapSession(project.ID, "first_server", "203.0.113.11", "root", "password", "", "boot-2", 22)
+	p2 := seedTestProbe(t, service, project.ID, "203.0.113.11", 22)
+	_, _ = service.CreateBootstrapSession(project.ID, "first_server", "203.0.113.11", "root", "password", "", "boot-2", 22, p2)
 	lease, ok, err := service.LeaseNextBootstrapSession("worker-1", "", now, 15*time.Minute)
 	if err != nil || !ok || lease.Session.ID != oldest.ID {
 		t.Fatalf("lease=%+v ok=%v err=%v", lease, ok, err)
@@ -83,7 +86,7 @@ func TestCommandBootstrapLeaseIsExactAndClaimedOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, err := service.CreateBootstrapSession(project.ID, "first_server", "203.0.113.90", "root", "command", "", "boot-command", 0)
+	session, err := service.CreateBootstrapSession(project.ID, "first_server", "203.0.113.90", "root", "command", "", "boot-command", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}

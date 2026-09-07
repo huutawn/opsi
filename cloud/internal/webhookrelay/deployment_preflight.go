@@ -11,7 +11,6 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/sourcescanner"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
-	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
@@ -848,7 +847,7 @@ func (s *Server) runPreflight(ctx context.Context, projectID string, request dep
 						if expectedPath == "" {
 							expectedPath = "/api"
 						}
-						if targetCfg.PublicRoute.Path != expectedPath {
+						if !targetCfg.PublicRoute.HasPath(expectedPath) {
 							result.Checks = append(result.Checks, deploymentv1.PreflightCheck{
 								ID:                    "chk:dep:" + service.Name + ":" + dep.LogicalName + ":SAME_ORIGIN_PATH_MISMATCH",
 								Code:                  deploymentv1.CodeDependencyRouteConflict,
@@ -885,7 +884,7 @@ func (s *Server) runPreflight(ctx context.Context, projectID string, request dep
 					continue
 				}
 				otherRoute := other.Configuration.PublicRoute
-				if otherRoute.Hostname == configuration.PublicRoute.Hostname && exposurev1.ManagedPathsConflict(otherRoute.Path, configuration.PublicRoute.Path) {
+				if otherRoute.Conflicts(*configuration.PublicRoute) {
 					result.Checks = append(result.Checks, deploymentv1.PreflightCheck{
 						ID:              "chk:exposure:" + service.Name + ":ROUTE_CONFLICT",
 						Code:            deploymentv1.CodeDependencyRouteConflict,

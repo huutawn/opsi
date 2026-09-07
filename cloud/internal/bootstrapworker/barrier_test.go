@@ -100,16 +100,12 @@ func TestGeneratedBarrierConfigPassesWorkerValidator(t *testing.T) {
 	root := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(mustCallerFile(t)))))
 	fixture := t.TempDir()
 	tokenPath := filepath.Join(fixture, "worker-token")
-	knownHostsPath := filepath.Join(fixture, "known_hosts")
 	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("t", 32)), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(knownHostsPath, []byte("example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEexample\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	source := filepath.Join(fixture, "bootstrap-worker.json")
 	output := filepath.Join(fixture, "bootstrap-worker.e2e.json")
-	sourceData := []byte(fmt.Sprintf(`{"cloud_url":"http://cloud:9800","allow_insecure_internal_cloud_url":true,"bootstrap_worker_token_file":%q,"worker_id":"worker-1","poll_interval":"1s","k3s_version":"v1.32.5+k3s1","k3s_installer_url":"https://get.k3s.io","k3s_installer_sha256":"%s","agent_install_url":"https://downloads.example/agent","agent_install_sha256":"%s","ssh_known_hosts_path":%q,"production":true,"timeout":"10m"}`, tokenPath, strings.Repeat("b", 64), strings.Repeat("a", 64), knownHostsPath))
+	sourceData := []byte(fmt.Sprintf(`{"cloud_url":"http://cloud:9800","allow_insecure_internal_cloud_url":true,"bootstrap_worker_token_file":%q,"worker_id":"worker-1","poll_interval":"1s","k3s_version":"v1.32.5+k3s1","k3s_installer_url":"https://get.k3s.io","k3s_installer_sha256":"%s","agent_install_url":"https://downloads.example/agent","agent_install_sha256":"%s","production":true,"timeout":"10m"}`, tokenPath, strings.Repeat("b", 64), strings.Repeat("a", 64)))
 	if err := os.WriteFile(source, sourceData, 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -33,6 +33,12 @@ export function ResourceProposalDialog({
     };
   }, []);
   const eligible = Boolean(recommendation?.eligible && recommendation.applications.length > 0);
+  const alreadyApplied = Boolean(recommendation?.applications.length && recommendation.applications.every((application) =>
+    application.current.cpu_request_milli === application.proposed.cpu_request_milli
+    && application.current.cpu_limit_milli === application.proposed.cpu_limit_milli
+    && application.current.memory_request_bytes === application.proposed.memory_request_bytes
+    && application.current.memory_limit_bytes === application.proposed.memory_limit_bytes,
+  ));
   const projection = recommendation?.budget_projection || {
     real_capacity: { cpu_millicores: recommendation?.target_capacity?.cpu_millicores || 0, memory_bytes: recommendation?.target_capacity?.memory_bytes || 0 },
     system_reserve: { cpu_millicores: 250, memory_bytes: 256 << 20 },
@@ -98,6 +104,15 @@ export function ResourceProposalDialog({
 
         {recommendation && !loading && (
           <div className="space-y-5">
+            {alreadyApplied && (
+              <div className="rounded-xl border border-status-ready/40 bg-status-ready/10 p-4 text-xs text-on-surface" role="status">
+                <div className="flex items-center gap-2 font-medium text-status-ready">
+                  <Icon name="check_circle" />
+                  <span>This proposal is already applied to the draft.</span>
+                </div>
+                <p className="mt-1 text-on-surface-variant">Close this dialog to continue reviewing the saved allocation.</p>
+              </div>
+            )}
             {/* Target Capacity Overview */}
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               <div className="rounded-xl border border-outline-variant/20 bg-surface-container-low p-3">
@@ -247,7 +262,7 @@ export function ResourceProposalDialog({
             Close
           </Button>
           <Button
-            disabled={!eligible || applying || loading}
+            disabled={!eligible || alreadyApplied || applying || loading}
             onClick={() => {
               if (recommendation) {
                 void onApply(recommendation);
@@ -256,7 +271,7 @@ export function ResourceProposalDialog({
             type="button"
             variant="primary"
           >
-            {applying ? "Applying to draft…" : "Apply to draft"}
+            {applying ? "Applying to draft…" : alreadyApplied ? "Already applied" : "Apply to draft"}
           </Button>
         </div>
       </div>

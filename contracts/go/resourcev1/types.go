@@ -28,6 +28,7 @@ const (
 	TypeRedis    Type = "redis"
 	TypeNATS     Type = "nats"
 	TypeRabbitMQ Type = "rabbitmq"
+	TypeKafka    Type = "kafka"
 )
 
 type SupportTier string
@@ -63,6 +64,7 @@ const (
 	ProtocolHTTP     Protocol = "http"
 	ProtocolTCP      Protocol = "tcp"
 	ProtocolCustom   Protocol = "custom"
+	ProtocolKafka    Protocol = "kafka"
 )
 
 type ValueSensitivity string
@@ -107,9 +109,34 @@ type ProvisioningCapability struct {
 	Profiles    []ProvisioningProfile `json:"profiles"`
 }
 
+type ProfileResourceDefaults struct {
+	CPUMillicores int64 `json:"cpu_millicores"`
+	MemoryBytes   int64 `json:"memory_bytes"`
+	StorageBytes  int64 `json:"storage_bytes"`
+}
+
+type ConfigValueType string
+
+const (
+	ConfigTypeInt    ConfigValueType = "int"
+	ConfigTypeString ConfigValueType = "string"
+	ConfigTypeBool   ConfigValueType = "bool"
+)
+
+type ConfigPropertyMetadata struct {
+	Name        string          `json:"name"`
+	Type        ConfigValueType `json:"type"`
+	Default     string          `json:"default"`
+	Description string          `json:"description,omitempty"`
+	Min         *int64          `json:"min,omitempty"`
+	Max         *int64          `json:"max,omitempty"`
+}
+
 type ProvisioningProfile struct {
-	Name     string             `json:"name"`
-	Versions []SupportedVersion `json:"versions"`
+	Name             string                   `json:"name"`
+	ResourceDefaults *ProfileResourceDefaults `json:"resource_defaults,omitempty"`
+	ConfigMetadata   []ConfigPropertyMetadata `json:"config_metadata,omitempty"`
+	Versions         []SupportedVersion       `json:"versions"`
 }
 
 type SupportedVersion struct {
@@ -140,13 +167,27 @@ type ManagedSpec struct {
 	MemoryBytes      int64             `json:"memory_bytes"`
 	Storage          StorageRequest    `json:"storage"`
 	ServiceConfig    map[string]string `json:"service_config,omitempty"`
+	Topics           []KafkaTopic      `json:"topics,omitempty"`
 	CredentialRefs   []SecretReference `json:"credential_refs,omitempty"`
 	ConnectionPolicy ExposurePolicy    `json:"connection_policy"`
+}
+
+// KafkaTopic is a declarative, non-secret Kafka topic contract. Topics are
+// provisioned by the managed Kafka reconciler; Opsi never executes repository
+// supplied shell commands to create them.
+type KafkaTopic struct {
+	Name           string `json:"name"`
+	Partitions     int32  `json:"partitions"`
+	RetentionHours int32  `json:"retention_hours,omitempty"`
 }
 
 const ManagedResourceSpecSchemaVersion = "opsi.managed_resource_spec/v1"
 
 const (
+	// ManagedResourceReadinessTimeoutSeconds bounds a cold-start reconcile while
+	// a fresh node pulls the provisioner and managed-service images.
+	ManagedResourceReadinessTimeoutSeconds = 8 * 60
+
 	FailureProvisioningUnsupported      = "MANAGED_RESOURCE_PROVISIONING_UNSUPPORTED"
 	FailureUnplaced                     = "MANAGED_RESOURCE_UNPLACED"
 	FailureAssignmentInvalid            = "MANAGED_RESOURCE_ASSIGNMENT_INVALID"
@@ -310,6 +351,8 @@ type ManagedResourceSpec struct {
 	Storage           StorageRequest            `json:"storage"`
 	Connection        ManagedResourceConnection `json:"connection"`
 	CredentialID      string                    `json:"credential_id,omitempty"`
+	ServiceConfig     map[string]string         `json:"service_config,omitempty"`
+	Topics            []KafkaTopic              `json:"topics,omitempty"`
 	ConfigurationHash string                    `json:"configuration_hash"`
 	TopologyRevision  uint64                    `json:"topology_revision"`
 	TopologyHash      string                    `json:"topology_hash"`
@@ -327,7 +370,7 @@ func (s ManagedResourceSpec) Hash() (string, error) {
 }
 
 func (s ManagedResourceSpec) Validate() error {
-	if s.SchemaVersion != ManagedResourceSpecSchemaVersion || s.ResourceID == "" || s.ProjectID == "" || s.EnvironmentID == "" || (s.ResourceType != TypeNATS && s.ResourceType != TypeRedis && s.ResourceType != TypePostgres) {
+	if s.SchemaVersion != ManagedResourceSpecSchemaVersion || s.ResourceID == "" || s.ProjectID == "" || s.EnvironmentID == "" || (s.ResourceType != TypeNATS && s.ResourceType != TypeRedis && s.ResourceType != TypePostgres && s.ResourceType != TypeKafka) {
 		return errors.New("managed resource identity is invalid")
 	}
 	expectedVersion, expectedImage := NATSVersion, NATSImage
@@ -335,6 +378,8 @@ func (s ManagedResourceSpec) Validate() error {
 		expectedVersion, expectedImage = ValkeyVersion, ValkeyImage
 	} else if s.ResourceType == TypePostgres {
 		expectedVersion, expectedImage = PostgresVersion, PostgresImage
+	} else if s.ResourceType == TypeKafka {
+		expectedVersion, expectedImage = KafkaVersion, KafkaImage
 	}
 	if s.Profile != "single-node-experimental" || s.Version != expectedVersion || s.Image != expectedImage || !strings.Contains(s.Image, "@sha256:") {
 		return errors.New("managed resource image authority is invalid")
@@ -345,6 +390,10 @@ func (s ManagedResourceSpec) Validate() error {
 	if s.ResourceType == TypePostgres {
 		if !s.Storage.Persistent || s.Storage.SizeBytes < 1 || s.Storage.PolicyRef != StoragePolicyDefault {
 			return errors.New("managed PostgreSQL storage intent is invalid")
+		}
+	} else if s.ResourceType == TypeKafka {
+		if !s.Storage.Persistent || s.Storage.SizeBytes < 1 || s.Storage.PolicyRef != StoragePolicyDefault {
+			return errors.New("managed Kafka storage intent is invalid")
 		}
 	} else if s.Storage.Persistent || s.Storage.SizeBytes != 0 || s.Storage.PolicyRef != "" {
 		return errors.New("managed resource runtime intent is invalid")
@@ -360,12 +409,27 @@ func (s ManagedResourceSpec) Validate() error {
 		if s.CredentialID == "" || s.Connection.Database != "opsi" || s.Connection.URL != "" {
 			return errors.New("managed resource credential authority is invalid")
 		}
+	} else if s.ResourceType == TypeKafka {
+		portName, port, protocol = "kafka", 9092, ProtocolKafka
+		if s.CredentialID == "" || s.Connection.Database != "" || s.Connection.URL != "" {
+			return errors.New("managed resource credential authority is invalid")
+		}
 	}
 	if len(s.Ports) != 1 || s.Ports[0].Name != portName || s.Ports[0].Port != port || s.Ports[0].Protocol != protocol || s.Connection.Protocol != protocol || s.Connection.Port != port || s.Connection.Host == "" || s.Connection.ServiceName == "" || s.ResourceType == TypeNATS && s.Connection.URL != "nats://"+s.Connection.Host+":4222" {
 		return errors.New("managed resource connection intent is invalid")
 	}
 	if len(s.ConfigurationHash) != 64 || s.TopologyRevision < 1 || len(s.TopologyHash) != 64 || len(s.SpecHash) != 64 {
 		return errors.New("managed resource revision authority is invalid")
+	}
+	if s.ResourceType == TypeKafka {
+		if err := ValidateKafkaServiceConfig(s.ServiceConfig); err != nil {
+			return errors.New("managed Kafka service config is invalid: " + err.Error())
+		}
+		if err := ValidateKafkaTopics(s.Topics); err != nil {
+			return errors.New("managed Kafka topics are invalid: " + err.Error())
+		}
+	} else if len(s.ServiceConfig) != 0 || len(s.Topics) != 0 {
+		return errors.New("managed resource service config is invalid")
 	}
 	hash, err := s.Hash()
 	if err != nil || hash != s.SpecHash {
@@ -381,6 +445,7 @@ type ManagedResourceEvidence struct {
 	ServiceReady      bool      `json:"service_ready"`
 	SecretReady       bool      `json:"secret_ready"`
 	AuthReady         bool      `json:"auth_ready"`
+	TopicsReady       bool      `json:"topics_ready,omitempty"`
 	Image             string    `json:"image"`
 	ImageID           string    `json:"image_id,omitempty"`
 	AvailableReplicas int32     `json:"available_replicas"`

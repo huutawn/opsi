@@ -39,14 +39,6 @@ func TestConfigValidation(t *testing.T) {
 		"zero installer checksum": func(c *Config) { c.K3sInstallerSHA256 = strings.Repeat("0", 64) },
 		"zero Agent checksum":     func(c *Config) { c.AgentInstallSHA256 = strings.Repeat("0", 64) },
 		"placeholder hostname":    func(c *Config) { c.AgentInstallURL = "https://example.invalid/opsi-agent" },
-		"missing known hosts":     func(c *Config) { c.SSHKnownHostsPath = "" },
-		"empty known hosts": func(c *Config) {
-			empty := filepath.Join(t.TempDir(), "known_hosts")
-			if err := os.WriteFile(empty, nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			c.SSHKnownHostsPath = empty
-		},
 		"small poll": func(c *Config) { c.PollInterval = time.Millisecond },
 		"large poll": func(c *Config) { c.PollInterval = 6 * time.Minute },
 	} {
@@ -89,11 +81,7 @@ func TestProductionHTTPCloudURLRequiresStagingOptIn(t *testing.T) {
 
 func validProductionWorkerConfig(t *testing.T) Config {
 	t.Helper()
-	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
-	if err := os.WriteFile(knownHosts, []byte("example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEexample\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return Config{CloudURL: "https://cloud-internal.example", AgentCloudURL: "https://cloud.example", BootstrapWorkerToken: strings.Repeat("x", 32), WorkerID: "bootstrap-worker.dev_01", PollInterval: time.Second, K3sVersion: "v1.32.5+k3s1", K3sInstallerURL: "https://get.k3s.io", K3sInstallerSHA256: strings.Repeat("b", 64), AgentInstallURL: "https://downloads.example/opsi-agent", AgentInstallSHA256: strings.Repeat("a", 64), SSHKnownHostsPath: knownHosts, Production: true}
+	return Config{CloudURL: "https://cloud-internal.example", AgentCloudURL: "https://cloud.example", BootstrapWorkerToken: strings.Repeat("x", 32), WorkerID: "bootstrap-worker.dev_01", PollInterval: time.Second, K3sVersion: "v1.32.5+k3s1", K3sInstallerURL: "https://get.k3s.io", K3sInstallerSHA256: strings.Repeat("b", 64), AgentInstallURL: "https://downloads.example/opsi-agent", AgentInstallSHA256: strings.Repeat("a", 64), Production: true}
 }
 
 func TestDevelopmentSmokeConfigAllowsNonfunctionalRemoteValues(t *testing.T) {

@@ -5,14 +5,15 @@ import { connectionProtocols, transitionMappings } from "@/features/deploy/conne
 import { publicSubdomainFromHostname, publicSubdomainSuffix, validatePublicSubdomain } from "@/features/deploy/public-subdomain";
 import { PlanCheck as Check, PlanField as Field, planSelectClass as selectClass } from "@/features/deploy/plan-form-controls";
 import { RuntimeConfigurationEditor } from "@/features/deploy/runtime-configuration-editor";
-import type { DeploymentPlan, ServiceRecord, WorkloadSecretMetadata } from "@/lib/contracts/registry";
-import { getApplicationEffectiveKeys, getUnreviewedApplications, isApplicationConfirmed } from "@/features/deploy/runtime-config";
+import type { DeploymentPlan, KafkaTopic, ResourceTypeDefinition, ServiceRecord, WorkloadSecretMetadata } from "@/lib/contracts/registry";
+import { getApplicationEffectiveKeys, getUnreviewedApplications, getUnreviewedResources, isApplicationConfirmed } from "@/features/deploy/runtime-config";
 
 type Props = {
   canEdit: boolean;
   dirty: boolean;
   plan: DeploymentPlan;
   quotaBlocked?: boolean;
+  resourceTypes?: ResourceTypeDefinition[];
   saving: boolean;
   services: ServiceRecord[];
   onPlan: (plan: DeploymentPlan) => void;
@@ -121,7 +122,7 @@ export function ApprovalPlanSummary({ children, onProposal, plan }: { children: 
   );
 }
 
-export function PlanReview({ canEdit, dirty, onPlan, onProposal, onResolveSecret, onListSecrets, onSave, plan, quotaBlocked = false, saving, services }: Props) {
+export function PlanReview({ canEdit, dirty, onPlan, onProposal, onResolveSecret, onListSecrets, onSave, plan, quotaBlocked = false, resourceTypes = [], saving, services }: Props) {
   const update = (change: (draft: DeploymentPlan) => void) => {
     const draft = structuredClone(plan);
     change(draft);
@@ -130,8 +131,13 @@ export function PlanReview({ canEdit, dirty, onPlan, onProposal, onResolveSecret
   const publicSubdomain = publicSubdomainFromHostname(plan.target.hostname);
   const publicSubdomainError = plan.target.exposure === "public" ? validatePublicSubdomain(publicSubdomain) : "";
   const unreviewedApplications = getUnreviewedApplications(plan);
-  const hasUnreviewed = unreviewedApplications.length > 0;
-  const firstUnreviewedIndex = hasUnreviewed ? plan.applications.findIndex((application) => application.source_key === unreviewedApplications[0].source_key) : -1;
+  const unreviewedResources = getUnreviewedResources(plan);
+  const hasUnreviewed = unreviewedApplications.length > 0 || unreviewedResources.length > 0;
+  const firstUnreviewedIndex = unreviewedApplications.length > 0 ? plan.applications.findIndex((application) => application.source_key === unreviewedApplications[0].source_key) : -1;
+  const firstUnreviewedResourceIndex = unreviewedResources.length > 0 ? plan.resources.findIndex((resource) => resource.logical_name === unreviewedResources[0].logical_name) : -1;
+  const reviewTargetID = unreviewedApplications.length > 0 ? `application-runtime-${firstUnreviewedIndex}` : `resource-review-${firstUnreviewedResourceIndex}`;
+  const kafkaProfile = resourceTypes.find((definition) => definition.type === "kafka")?.provisioning.profiles[0];
+  const kafkaConfig = (name: string) => kafkaProfile?.config_metadata?.find((item) => item.name === name);
 
   return (
     <section aria-labelledby="plan-review-title" className="space-y-6">
@@ -144,7 +150,7 @@ export function PlanReview({ canEdit, dirty, onPlan, onProposal, onResolveSecret
         <div className="flex flex-wrap items-center gap-2">
           {onProposal && <Button onClick={onProposal} type="button" variant="outline"><Icon name="tune" />Resource proposal</Button>}
           <Button
-            disabled={!canEdit || saving || !dirty || quotaBlocked || Boolean(publicSubdomainError) || deploymentMappingError(plan.dependencies) || hasUnreviewed}
+            disabled={!canEdit || saving || !dirty || quotaBlocked || Boolean(publicSubdomainError) || deploymentMappingError(plan.dependencies)}
             onClick={onSave}
           >
             Save Draft
@@ -162,20 +168,22 @@ export function PlanReview({ canEdit, dirty, onPlan, onProposal, onResolveSecret
             <span>
               {unreviewedApplications.length === 1
                 ? `Application "${unreviewedApplications[0].name}" requires runtime configuration or confirmation.`
-                : `${unreviewedApplications.length} applications require runtime configuration or confirmation.`}
+                : unreviewedApplications.length > 1
+                  ? `${unreviewedApplications.length} applications require runtime configuration or confirmation.`
+                  : `Managed resource "${unreviewedResources[0].logical_name}" requires acknowledgement.`}
             </span>
           </div>
           <a
             className="font-medium text-primary underline underline-offset-4 cursor-pointer"
-            href={`#application-runtime-${firstUnreviewedIndex}`}
+            href={`#${reviewTargetID}`}
             onClick={(e) => {
               e.preventDefault();
-              const el = document.getElementById(`application-runtime-${firstUnreviewedIndex}`);
+              const el = document.getElementById(reviewTargetID);
               el?.scrollIntoView({ behavior: "smooth" });
               el?.focus();
             }}
           >
-            Review {unreviewedApplications[0].name}
+            Review {unreviewedApplications[0]?.name || unreviewedResources[0]?.logical_name}
           </a>
         </div>
       )}
@@ -280,7 +288,7 @@ export function PlanReview({ canEdit, dirty, onPlan, onProposal, onResolveSecret
             <p className="text-sm text-on-surface-variant">No managed resource detected.</p>
           ) : (
             plan.resources.map((resource, index) => (
-              <article className="border-t border-outline-variant/30 pt-3 first:border-0 first:pt-0" key={resource.logical_name}>
+              <article className="border-t border-outline-variant/30 pt-3 first:border-0 first:pt-0" id={`resource-review-${index}`} key={resource.logical_name} tabIndex={-1}>
                 <div className="flex items-center justify-between gap-3">
                   <strong>{resource.logical_name}</strong>
                   <Confidence value={resource.confidence} />
@@ -299,9 +307,79 @@ export function PlanReview({ canEdit, dirty, onPlan, onProposal, onResolveSecret
                   <Check checked={resource.required} label="Required" onChange={(checked) => update((draft) => { draft.resources[index].required = checked; })} />
                   <Check checked={resource.persistence?.persistent || false} label="Persistent data" onChange={(checked) => update((draft) => { draft.resources[index].persistence = { ...draft.resources[index].persistence, persistent: checked }; })} />
                   <Field label="Storage (GiB)">
-                    <Input min={1} type="number" value={resource.persistence?.size_bytes ? resource.persistence.size_bytes >> 30 : ""} onChange={(event) => update((draft) => { draft.resources[index].persistence = { persistent: draft.resources[index].persistence?.persistent || false, ...draft.resources[index].persistence, size_bytes: optionalNumber(event.target.value) ? Number(event.target.value) * 2 ** 30 : undefined }; })} />
+                    <Input min={1} type="number" value={resource.persistence?.size_bytes ? resource.persistence.size_bytes / 2 ** 30 : ""} onChange={(event) => update((draft) => { draft.resources[index].persistence = { persistent: draft.resources[index].persistence?.persistent || false, ...draft.resources[index].persistence, size_bytes: optionalNumber(event.target.value) ? Number(event.target.value) * 2 ** 30 : undefined }; })} />
                   </Field>
                 </div>
+                {resource.type === "kafka" && resource.managed && (
+                  <div className="col-span-full mt-3 space-y-3 rounded-lg border border-outline-variant/30 bg-surface-container p-3 text-xs">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-outline-variant/20 pb-2">
+                      <span className="font-semibold text-on-surface">Kafka Profile & Specs</span>
+                      <span className="font-mono text-on-surface-variant">{kafkaProfile ? `Apache Kafka ${kafkaProfile.versions[0]?.version || "—"} (${kafkaProfile.name})` : "Profile facts unavailable"}</span>
+                    </div>
+                    {kafkaProfile ? <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 font-mono text-[11px] text-on-surface-variant">
+                      <div>CPU: <strong className="text-on-surface">{kafkaProfile.resource_defaults?.cpu_millicores || "—"}m</strong></div>
+                      <div>RAM: <strong className="text-on-surface">{formatBytes(kafkaProfile.resource_defaults?.memory_bytes)}</strong></div>
+                      <div>Storage: <strong className="text-on-surface">{resource.persistence?.size_bytes ? formatBytes(resource.persistence.size_bytes) : formatBytes(kafkaProfile.resource_defaults?.storage_bytes)} PVC</strong></div>
+                    </div> : <p className="text-on-surface-variant" role="status">Kafka profile facts could not be loaded. The server will still validate this resource before approval.</p>}
+                    <div className="grid gap-3 sm:grid-cols-2 pt-1">
+                      <Field label={`Partitions (${kafkaConfig("num_partitions")?.min ?? 1}..${kafkaConfig("num_partitions")?.max ?? 100})`}>
+                        <Input min={kafkaConfig("num_partitions")?.min ?? 1} max={kafkaConfig("num_partitions")?.max ?? 100} type="number" value={resource.settings?.num_partitions || kafkaConfig("num_partitions")?.default || ""} onChange={(event) => update((draft) => {
+                          const val = event.target.value;
+                          draft.resources[index].settings = { ...draft.resources[index].settings, num_partitions: val };
+                        })} />
+                      </Field>
+                      <Field label={`Retention (hours, ${kafkaConfig("retention_hours")?.min ?? 1}..${kafkaConfig("retention_hours")?.max ?? 8760})`}>
+                        <Input min={kafkaConfig("retention_hours")?.min ?? 1} max={kafkaConfig("retention_hours")?.max ?? 8760} type="number" value={resource.settings?.retention_hours || kafkaConfig("retention_hours")?.default || ""} onChange={(event) => update((draft) => {
+                          const val = event.target.value;
+                          draft.resources[index].settings = { ...draft.resources[index].settings, retention_hours: val };
+                        })} />
+                      </Field>
+                    </div>
+                    <div className="space-y-2 border-t border-outline-variant/20 pt-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold text-on-surface">Declared topics</span>
+                        <Button type="button" variant="outline" onClick={() => update((draft) => {
+                          const topics = draft.resources[index].topics || [];
+                          draft.resources[index].topics = sortKafkaTopics([...topics, {
+                            name: nextKafkaTopicName(topics),
+                            partitions: Number(resource.settings?.num_partitions || kafkaConfig("num_partitions")?.default || 3),
+                          }]);
+                        })}>Add topic</Button>
+                      </div>
+                      {(resource.topics || []).length === 0 ? <p className="text-on-surface-variant">No topic is declared. Add every topic required by the application before approval.</p> : (
+                        <div className="space-y-2">
+                          {(resource.topics || []).map((topic, topicIndex) => (
+                            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_8rem_8rem_auto]" key={`${topic.name}-${topicIndex}`}>
+                              <Input aria-label={`Kafka topic ${topicIndex + 1} name`} value={topic.name} onChange={(event) => update((draft) => { const topics = [...(draft.resources[index].topics || [])]; topics[topicIndex] = { ...topics[topicIndex], name: event.target.value }; draft.resources[index].topics = sortKafkaTopics(topics); })} />
+                              <Input aria-label={`Kafka topic ${topic.name} partitions`} min={1} max={100} type="number" value={topic.partitions} onChange={(event) => update((draft) => { const topics = [...(draft.resources[index].topics || [])]; topics[topicIndex] = { ...topics[topicIndex], partitions: Number(event.target.value) }; draft.resources[index].topics = topics; })} />
+                              <Input aria-label={`Kafka topic ${topic.name} retention hours`} min={1} max={8760} type="number" placeholder="Broker default" value={topic.retention_hours || ""} onChange={(event) => update((draft) => { const topics = [...(draft.resources[index].topics || [])]; topics[topicIndex] = { ...topics[topicIndex], retention_hours: optionalNumber(event.target.value) }; draft.resources[index].topics = topics; })} />
+                              <Button aria-label={`Remove Kafka topic ${topic.name}`} type="button" variant="outline" onClick={() => update((draft) => { draft.resources[index].topics = (draft.resources[index].topics || []).filter((_, candidateIndex) => candidateIndex !== topicIndex); })}>Remove</Button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <div className="rounded border border-status-warning/40 bg-status-warning/10 p-2.5 text-xs text-on-surface">
+                      <div className="flex items-center gap-2 font-medium text-status-warning">
+                        <Icon name="warning" className="text-sm" />
+                        <span>Single-node experimental Kafka</span>
+                      </div>
+                      <p className="mt-1 text-on-surface-variant">
+                        Single-node broker with KRaft (RF=1, min.isr=1). No high availability, no multi-broker replication, and no automated backup. Suitable for development and test workloads only.
+                      </p>
+                    </div>
+                    <Check
+                      checked={(resource.acknowledgements || []).includes("kafka_single_node_experimental")}
+                      label="I acknowledge this is an experimental single-node Kafka without HA or backup"
+                      onChange={(checked) => update((draft) => {
+                        const acknowledgements = new Set(draft.resources[index].acknowledgements || []);
+                        if (checked) acknowledgements.add("kafka_single_node_experimental");
+                        else acknowledgements.delete("kafka_single_node_experimental");
+                        draft.resources[index].acknowledgements = [...acknowledgements];
+                      })}
+                    />
+                  </div>
+                )}
                 <Evidence confidence={resource.confidence} evidence={resource.evidence} reason={resource.reason} />
               </article>
             ))
@@ -350,7 +428,7 @@ export function PlanReview({ canEdit, dirty, onPlan, onProposal, onResolveSecret
               </Field>
               <Field label="Protocol">
                 <select className={selectClass} value={dependency.protocol} onChange={(event) => update((draft) => { const item = draft.dependencies[index]; item.protocol = event.target.value; item.injections = transitionMappings(item.injections || [], item.protocol, item.strategy); })}>
-                  {connectionProtocols.map((protocol) => <option key={protocol} value={protocol}>{protocol === "http" ? "HTTP" : protocol === "postgres" ? "PostgreSQL" : protocol === "redis" ? "Redis / Valkey" : "NATS"}</option>)}
+                  {connectionProtocols.map((protocol) => <option key={protocol} value={protocol}>{protocol === "http" ? "HTTP" : protocol === "postgres" ? "PostgreSQL" : protocol === "redis" ? "Redis / Valkey" : protocol === "kafka" ? "Kafka" : "NATS"}</option>)}
                 </select>
               </Field>
               <Field label="Strategy">
@@ -413,6 +491,24 @@ function Evidence({ confidence, evidence, reason }: { confidence: string; eviden
   );
 }
 
+function sortKafkaTopics(topics: KafkaTopic[]) {
+  return [...topics].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function nextKafkaTopicName(topics: KafkaTopic[]) {
+  const names = new Set(topics.map((topic) => topic.name));
+  for (let sequence = 1; ; sequence++) {
+    const candidate = `new-topic-${sequence}`;
+    if (!names.has(candidate)) return candidate;
+  }
+}
+
 function optionalNumber(value: string) {
   return value === "" ? undefined : Number(value);
+}
+
+function formatBytes(value: number | undefined): string {
+  if (!value) return "—";
+  if (value % 2 ** 30 === 0) return `${value / 2 ** 30} GiB`;
+  return `${value / 2 ** 20} MiB`;
 }

@@ -68,6 +68,36 @@ func (s *MemoryStore) RejectDispatch(_ context.Context, attemptID, code string, 
 	return nil
 }
 
+func (s *MemoryStore) ExpireUnclaimedDispatch(_ context.Context, projectID, applicationID, jobID string, cutoff, now time.Time) (Job, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job, ok := s.byID[jobID]
+	if !ok || job.ProjectID != projectID || job.ApplicationID != applicationID {
+		return Job{}, false, Error{Code: "BUILD_JOB_NOT_FOUND", Status: 404, Message: "BuildJob was not found.", Cause: "build_job"}
+	}
+	if job.Status != StatusReady {
+		return job, false, nil
+	}
+	for id, attempt := range s.attempts {
+		if attempt.BuildJobID != jobID || attempt.LastState != DispatchStateDispatched || attempt.DispatchedAt.After(cutoff) {
+			continue
+		}
+		attempt.LastState = DispatchStateRejected
+		attempt.FailureCode = "RUNNER_CLAIM_TIMEOUT"
+		attempt.CompletedAt = &now
+		s.attempts[id] = attempt
+		job.Status = StatusFailed
+		job.FailureCode = "RUNNER_CLAIM_TIMEOUT"
+		job.FailureMessageRedacted = "The build executor did not claim its dispatched job before the deadline."
+		job.FailureCause = "executor"
+		job.CompletedAt = &now
+		job.UpdatedAt = now
+		s.byID[jobID] = job
+		return job, true, nil
+	}
+	return job, false, nil
+}
+
 func (s *MemoryStore) ClaimDispatch(_ context.Context, jobID, attemptID string, identity RunnerIdentity, leaseHash []byte, expiresAt, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

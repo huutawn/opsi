@@ -4,7 +4,7 @@ import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Button, Icon, PageHeader, StatusBadge } from "@/components/ui/primitives";
 import { DeploymentTimeline } from "@/features/deploy/deployment-timeline";
 import { ApprovalPlanSummary, PlanReview } from "@/features/deploy/plan-review";
-import { getUnreviewedApplications } from "@/features/deploy/runtime-config";
+import { getUnreviewedApplications, getUnreviewedResources } from "@/features/deploy/runtime-config";
 import { SourceStep } from "@/features/deploy/source-step";
 import type { ConsoleController } from "@/features/console/types";
 import { BootstrapCommand, BootstrapDialog, BootstrapProgress } from "@/features/deploy/target-bootstrap";
@@ -14,7 +14,7 @@ import { PublicHostnameQuotaPanel } from "@/features/deploy/public-hostname-quot
 import { publicHostname, publicSubdomainFromHostname } from "@/features/deploy/public-subdomain";
 import { ResourceProposalDialog } from "@/features/deploy/resource-proposal-dialog";
 import { LocalAPIError, LocalClient } from "@/lib/api/local-client";
-import type { AnalysisScope, DeploymentPlan, DeploymentRun, DeploymentRunEvent, DeploymentRunResult, GitHubInstallation, GitHubRepository, PublicHostnameAllocation, PublicHostnameQuota, RepositoryExportPreview, RepositoryExportResult, ResourceRecommendation, WorkloadSecretMetadata } from "@/lib/contracts/registry";
+import type { AnalysisScope, DeploymentPlan, DeploymentRun, DeploymentRunEvent, DeploymentRunResult, GitHubInstallation, GitHubRepository, PublicHostnameAllocation, PublicHostnameQuota, RepositoryExportPreview, RepositoryExportResult, ResourceRecommendation, ResourceTypeDefinition, WorkloadSecretMetadata } from "@/lib/contracts/registry";
 import { terminalBootstrap } from "@/lib/presentation/infrastructure/model";
 
 export function DeployView({ console }: { console: ConsoleController }) {
@@ -28,6 +28,7 @@ export function DeployView({ console }: { console: ConsoleController }) {
   const [events, setEvents] = useState<DeploymentRunEvent[]>([]);
   const [result, setResult] = useState<DeploymentRunResult | null>(null);
   const [hostnameQuota, setHostnameQuota] = useState<PublicHostnameQuota | null>(null);
+  const [resourceTypes, setResourceTypes] = useState<ResourceTypeDefinition[]>([]);
   const [draftPlan, setDraftPlan] = useState<DeploymentPlan | null>(null);
   const [installationID, setInstallationID] = useState(0);
   const [repositoryID, setRepositoryID] = useState(0);
@@ -88,6 +89,13 @@ export function DeployView({ console }: { console: ConsoleController }) {
   }, [client, installationID, projectID, run?.id]);
 
   useEffect(() => { void load(true); }, [projectID]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!projectID) {
+      setResourceTypes([]);
+      return;
+    }
+    void client.resourceTypes(projectID).then(setResourceTypes).catch(() => setResourceTypes([]));
+  }, [client, projectID]);
   useEffect(() => {
     const saved = readSourceDraft(projectID);
     setInstallationID(saved?.installationID || 0);
@@ -187,7 +195,6 @@ export function DeployView({ console }: { console: ConsoleController }) {
           };
         }
       }
-      setDraftPlan(updatedPlan);
       const updatedRun = await client.updateDeploymentPlan(
         projectID,
         run.id,
@@ -205,7 +212,8 @@ export function DeployView({ console }: { console: ConsoleController }) {
       const failure = deployFailure(cause);
       if (failure.code === "RESOURCE_RECOMMENDATION_STALE") {
         setRecError("Resource recommendation is stale because cluster topology or capacity changed. Loading refreshed proposal…");
-        void loadRecommendation(true);
+        await load(true);
+        await loadRecommendation(true);
       } else {
         setError(failure);
       }
@@ -229,7 +237,7 @@ export function DeployView({ console }: { console: ConsoleController }) {
 				const facts = await client.placementFacts(projectID);
 				if (!targetResume.current && facts.runtimes.some((runtime) => runtime.status === "ready")) {
 					targetResume.current = true;
-					const resumed = await mutate("analyze", () => client.deploymentRunAction(projectID, run.id, "analyze", {}, crypto.randomUUID()));
+					const resumed = await mutate("analyze", () => client.deploymentRunAction(projectID, run.id, "analyze", { preserve_review: true }, crypto.randomUUID()));
 					if (!resumed) targetResume.current = false;
 					else void loadRecommendation(true);
 				}
@@ -257,21 +265,25 @@ export function DeployView({ console }: { console: ConsoleController }) {
       <PublicHostnameQuotaPanel busy={busy} canMutate={canMutate} onAction={(allocation, actionName) => void hostnameAction(allocation, actionName)} projectID={projectID} quota={hostnameQuota} />
       {sourceOnly ? <SourceStep busy={busy} canMutate={canMutate && !isAuthFailure(error)} hostname={hostname} installationID={installationID} installations={installations} linkedInstallationIDs={linkedInstallationIDs} onConnectInstallation={() => void connectInstallation()} onDiscover={() => void discoverGitHub()} onHostname={(value) => { setHostname(value); updateSourceDraft(projectID, { hostname: value }); }} onInstallation={(value) => { setInstallationID(value); updateSourceDraft(projectID, { installationID: value }); }} onRef={(value) => { setRefName(value); updateSourceDraft(projectID, { refName: value }); }} onRepository={(value) => { setRepositoryID(value); updateSourceDraft(projectID, { repositoryID: value }); }} onStart={() => void sourceAction()} quotaBlocked={hostnameQuotaBlocked(hostname)} refName={refName} repositories={repositories} repositoryID={repositoryID} /> : run && <>
         <RunHeader onSelect={(id) => { const selected = runs.find((item) => item.id === id) || null; setRun(selected); setExportResult(null); setDraftPlan(selected ? structuredClone(selected.plan) : null); setHostname(selected?.plan.target.hostname || ""); if (selected) void Promise.all([client.deploymentRunEvents(projectID, selected.id), client.deploymentRunResult(projectID, selected.id)]).then(([timeline, projection]) => { setEvents(timeline.events || []); setResult(projection); }); }} run={run} runs={runs} />
-        {run.state === "awaiting_input" && draftPlan && <div className="border border-outline-variant/30 bg-surface-container p-4 sm:p-6"><PlanReview canEdit={canMutate} dirty={draftDirty} onListSecrets={listSecrets} onPlan={setDraftPlan} onProposal={() => void loadRecommendation(true)} onResolveSecret={resolveSecret} onSave={() => void saveDraft()} plan={draftPlan} quotaBlocked={hostnameQuotaBlocked(draftPlan.target.hostname || "")} saving={busy === "plan"} services={console.state.services} /></div>}
-        {run.state === "awaiting_approval" && draftPlan && <ApprovalPlanSummary onProposal={() => void loadRecommendation(true)} plan={draftPlan}><PlanReview canEdit={canMutate} dirty={draftDirty} onListSecrets={listSecrets} onPlan={setDraftPlan} onResolveSecret={resolveSecret} onSave={() => void saveDraft()} plan={draftPlan} quotaBlocked={hostnameQuotaBlocked(draftPlan.target.hostname || "")} saving={busy === "plan"} services={console.state.services} /><RepositoryExport canCreate={canMutate} onCreate={createExport} onPreview={previewExport} result={exportResult} /></ApprovalPlanSummary>}
+        {run.state === "awaiting_input" && draftPlan && <div className="border border-outline-variant/30 bg-surface-container p-4 sm:p-6"><PlanReview canEdit={canMutate} dirty={draftDirty} onListSecrets={listSecrets} onPlan={setDraftPlan} onProposal={() => void loadRecommendation(true)} onResolveSecret={resolveSecret} onSave={() => void saveDraft()} plan={draftPlan} quotaBlocked={hostnameQuotaBlocked(draftPlan.target.hostname || "")} resourceTypes={resourceTypes} saving={busy === "plan"} services={console.state.services} /></div>}
+        {run.state === "awaiting_approval" && draftPlan && <ApprovalPlanSummary onProposal={() => void loadRecommendation(true)} plan={draftPlan}><PlanReview canEdit={canMutate} dirty={draftDirty} onListSecrets={listSecrets} onPlan={setDraftPlan} onResolveSecret={resolveSecret} onSave={() => void saveDraft()} plan={draftPlan} quotaBlocked={hostnameQuotaBlocked(draftPlan.target.hostname || "")} resourceTypes={resourceTypes} saving={busy === "plan"} services={console.state.services} /><RepositoryExport canCreate={canMutate} onCreate={createExport} onPreview={previewExport} result={exportResult} /></ApprovalPlanSummary>}
         {run.plan.issues.some((issue) => issue.code === "ANALYSIS_TRUNCATED") && <RefineAnalysis
           busy={busy === "analyze"}
           initialScope={run.plan.analysis_scope || { application_roots: [], exclude_paths: [] }}
           onRefine={(scope) => void refine(scope)}
         />}
         {run.state === "awaiting_input" && <RepositoryExport canCreate={canMutate} onCreate={createExport} onPreview={previewExport} result={exportResult} />}
-		{needsServer && bootstrapSession && <BootstrapProgress events={bootstrapEvents} session={bootstrapSession} />}
+		{needsServer && bootstrapSession && <BootstrapProgress console={console} events={bootstrapEvents} session={bootstrapSession} />}
 		{needsServer && console.state.bootstrapCommand && <BootstrapCommand command={console.state.bootstrapCommand} />}
         {!['awaiting_input','awaiting_approval'].includes(run.state) && <div className="border border-outline-variant/30 bg-surface-container p-4 sm:p-6"><DeploymentTimeline events={events} run={run} /></div>}
         {run.state === "succeeded" && result && <DeploymentResult canMutate={canMutate} client={client} plan={run.plan} projectID={projectID} result={result} />}
         {(() => {
-          const unreviewedApps = draftPlan || run.plan ? getUnreviewedApplications((draftPlan || run.plan)!) : [];
-          return <PrimaryAction bootstrapActive={bootstrapActive} busy={busy} canMutate={canMutate} connectTrigger={connectTrigger} draftDirty={draftDirty} hasUnreviewed={unreviewedApps.length > 0} needsServer={needsServer} onAction={action} onConnect={() => setShowConnect(true)} onNew={() => { setShowNew(true); setHostname(""); setError(null); }} onSaveDraft={() => void saveDraft()} run={run} unreviewedAppName={unreviewedApps[0]?.name} />;
+          const plan = draftPlan || run.plan;
+          const unreviewedApps = plan ? getUnreviewedApplications(plan) : [];
+          const unreviewedRes = plan ? getUnreviewedResources(plan) : [];
+          const hasUnreviewed = unreviewedApps.length > 0 || unreviewedRes.length > 0;
+          const unreviewedName = unreviewedApps[0]?.name || (unreviewedRes[0] ? `managed resource "${unreviewedRes[0].logical_name}"` : "");
+          return <PrimaryAction bootstrapActive={bootstrapActive} busy={busy} canMutate={canMutate} connectTrigger={connectTrigger} draftDirty={draftDirty} hasUnreviewed={hasUnreviewed} needsServer={needsServer} onAction={action} onConnect={() => setShowConnect(true)} onNew={() => { setShowNew(true); setHostname(""); setError(null); }} onSaveDraft={() => void saveDraft()} run={run} unreviewedAppName={unreviewedName} />;
         })()}
         <TechnicalDetails events={events} result={result} run={run} />
 		{showConnect && <BootstrapDialog console={console} onClose={() => { setShowConnect(false); window.requestAnimationFrame(() => connectTrigger.current?.focus()); }} onCreated={async () => { await console.actions.load(); }} />}
@@ -360,6 +372,10 @@ function PrimaryAction({ bootstrapActive, busy, canMutate, connectTrigger, draft
   let newDeployment = false;
   let saveDraftFirst = false;
   if (run.state === "awaiting_input" && needsServer) label = bootstrapActive ? "Connecting server…" : "Connect server";
+  else if (run.state === "awaiting_input" && draftDirty) { label = "Save review changes"; saveDraftFirst = true; }
+  else if (run.state === "awaiting_input" && hasUnreviewed) {
+    return <div className="sticky bottom-4 z-10 border border-status-warning/40 bg-status-warning/10 p-4 text-sm text-on-surface" role="status">Review the required application configuration and managed-resource acknowledgement above. Saving the completed review will continue to approval.</div>;
+  }
   else if (run.state === "awaiting_input" || run.state === "stale") { label = "Analyze again"; action = "analyze"; }
   else if (run.state === "awaiting_approval" && draftDirty) { label = "Save changes before approval"; saveDraftFirst = true; }
   else if (run.state === "awaiting_approval") { label = "Approve & Deploy"; action = "approve"; body = { plan_hash: run.plan.hash }; }

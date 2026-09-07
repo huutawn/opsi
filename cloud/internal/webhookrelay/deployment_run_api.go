@@ -86,7 +86,7 @@ func (s *Server) handleDeploymentRunAPI(w http.ResponseWriter, r *http.Request, 
 				_, _ = s.PublicHostnames.Released(r.Context(), reserved.ID)
 			}
 			if !reused {
-				if analyzed, analysisErr := s.analyzeDeploymentRun(r.Context(), projectID, run.ID, nil); analysisErr == nil {
+				if analyzed, analysisErr := s.analyzeDeploymentRun(r.Context(), projectID, run.ID, nil, false); analysisErr == nil {
 					run = analyzed
 				} else {
 					writeRegistryFailure(w, r, analysisErr)
@@ -201,12 +201,13 @@ func (s *Server) handleDeploymentRunAPI(w http.ResponseWriter, r *http.Request, 
 	switch action {
 	case "analyze":
 		var request struct {
-			Scope *repositoryanalysis.Scope `json:"scope"`
+			Scope          *repositoryanalysis.Scope `json:"scope"`
+			PreserveReview bool                      `json:"preserve_review"`
 		}
 		if !decodeJSON(w, r, &request) {
 			return true
 		}
-		run, err = s.analyzeDeploymentRun(r.Context(), projectID, runID, request.Scope)
+		run, err = s.analyzeDeploymentRun(r.Context(), projectID, runID, request.Scope, request.PreserveReview)
 	case "approve":
 		var request struct {
 			PlanHash string `json:"plan_hash"`
@@ -461,7 +462,7 @@ func (s *Server) cancelWorkflowDeployments(projectID string, run deploymentworkf
 	return nil
 }
 
-func (s *Server) analyzeDeploymentRun(ctx context.Context, projectID, runID string, requestedScope *repositoryanalysis.Scope) (deploymentworkflow.Run, error) {
+func (s *Server) analyzeDeploymentRun(ctx context.Context, projectID, runID string, requestedScope *repositoryanalysis.Scope, preserveReview bool) (deploymentworkflow.Run, error) {
 	run, err := s.DeploymentRuns.Get(ctx, projectID, runID)
 	if err != nil {
 		return run, err
@@ -503,7 +504,7 @@ func (s *Server) analyzeDeploymentRun(ctx context.Context, projectID, runID stri
 	if err != nil {
 		return run, err
 	}
-	return s.DeploymentRuns.SetAnalysis(ctx, projectID, runID, analysis, authority, target)
+	return s.DeploymentRuns.SetAnalysis(ctx, projectID, runID, analysis, authority, target, preserveReview)
 }
 
 func (s *Server) recordConnectionAnalysisMetrics(analysis repositoryanalysis.Result) {

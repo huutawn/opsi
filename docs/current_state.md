@@ -596,11 +596,12 @@ Safe ActionPlane client.
   between destructive steps remains unproven.
 - Worker configuration no longer accepts fixed `session_id`. It requires an
   operator-pinned K3s version, installer URL/SHA-256, Agent artifact URL/SHA-256,
-  and an Agent-reachable Cloud URL. Production requires HTTPS by default and a
-  trusted, non-empty, non-writable `known_hosts` file; SSH has no insecure
-  fallback. SSH host-key negotiation is restricted to algorithms actually
-  pinned for the target host, preventing an unpinned ECDSA key from preempting
-  an operator-confirmed ED25519 key. The staging-only `http://cloud:9800`
+  and an Agent-reachable Cloud URL. Production requires HTTPS by default; SSH
+  has no insecure fallback. SSH uses project-scoped host-key trust authority
+  with TOFU on initial connection, strict in-memory key verification on
+  subsequent connections, and interactive operator confirmation on key rotation.
+  SSH host-key negotiation is restricted to algorithms actually pinned for the
+  target host, preventing an unpinned ECDSA key from preempting an operator-confirmed ED25519 key. The staging-only `http://cloud:9800`
   control URL requires an explicit opt-in that is rejected for every other
   endpoint or non-production configuration; `agent_cloud_url` remains HTTPS.
 - Bootstrap accepts password or unencrypted SSH private-key credentials. Worker

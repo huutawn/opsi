@@ -57,7 +57,7 @@ The worker has two Cloud URLs:
 - `cloud_url`: internal worker-to-Cloud control URL, such as `http://cloud:9800` inside Docker Compose.
 - `agent_cloud_url`: URL reachable from the target VPS and later used by the installed Agent. For a remote VPS this must be a public/private-routable HTTPS URL, not a Docker service name or `127.0.0.1`.
 
-The default command flow requires no SSH credential or `known_hosts` input and must run as root on a Linux amd64 target. Advanced password and unencrypted SSH private-key authentication remain supported. SSH never falls back to insecure host-key acceptance. Operators using SSH must provide a trusted regular `known_hosts` file; production also requires it to be non-empty and requires HTTPS for K3s, Agent artifact, Cloud, and Agent-facing URLs. K3s version and both installer/artifact SHA-256 values must be explicitly pinned; the worker does not discover latest versions.
+The default command flow requires no SSH credential and must run as root on a Linux amd64 target. Advanced password and unencrypted SSH private-key authentication remain supported. SSH never falls back to insecure host-key acceptance. SSH uses project-scoped host-key trust authority with TOFU on initial connection, strict key comparison on subsequent connections, and interactive operator confirmation on key rotation. Production requires HTTPS for K3s, Agent artifact, Cloud, and Agent-facing URLs. K3s version and both installer/artifact SHA-256 values must be explicitly pinned; the worker does not discover latest versions.
 
 ## Build and test
 

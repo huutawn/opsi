@@ -259,7 +259,28 @@ function ResourceDetailDrawer({
                 </div>
               </div>
 
-              {resource.type.toLowerCase().includes("postgres") ? (
+              {resource.type.toLowerCase().includes("kafka") ? (
+                <div className="bg-surface-container/60 p-4 rounded-2xl border border-outline-variant/15 space-y-2 text-xs">
+                  <h3 className="font-headline-md text-sm font-bold text-on-surface">Kafka Safe Runtime Facts</h3>
+                  <div className="grid grid-cols-2 gap-2 text-[11px]">
+                    <div>Broker Readiness: <strong className="text-on-surface">{resource.brokerReady ? "✓ Ready" : "Pending"}</strong></div>
+                    <div>Authentication: <strong className="text-on-surface">{resource.authReady ? "✓ Verified (SASL/PLAIN)" : "Pending"}</strong></div>
+                    <div>Volume Mount: <strong className="text-on-surface">{resource.persistentStorage ? "Mounted persistent volume" : "Ephemeral"}</strong></div>
+                    <div>Security: <strong className="text-on-surface">SASL_PLAINTEXT (ClusterIP)</strong></div>
+                    {resource.pvcName && (
+                      <div className="col-span-full font-mono text-on-surface-variant">
+                        PVC: <strong className="text-on-surface">{resource.pvcName}</strong> {resource.pvcUID ? `(${resource.pvcUID.slice(0, 12)}…)` : ""}
+                      </div>
+                    )}
+                  </div>
+                  <div className="space-y-1 pt-1 border-t border-outline-variant/15">
+                    <strong className="text-on-surface block">Credentials Safety</strong>
+                    <p className="text-on-surface-variant text-[11px]">
+                      Broker username & password protected; runtime secrets are never exposed in Observability or logs.
+                    </p>
+                  </div>
+                </div>
+              ) : resource.type.toLowerCase().includes("postgres") ? (
                 <div className="bg-surface-container/60 p-4 rounded-2xl border border-outline-variant/15 space-y-2 text-xs">
                   <h3 className="font-headline-md text-sm font-bold text-on-surface">PostgreSQL Safe Runtime Facts</h3>
                   <p className="text-on-surface-variant">

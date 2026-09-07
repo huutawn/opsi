@@ -2,6 +2,23 @@ package serviceconfigurationv1
 
 import "testing"
 
+func TestPublicRouteAliasesAreCanonicalAndParticipateInRouteChecks(t *testing.T) {
+	route := Normalize(ServiceConfigurationDraft{PublicRoute: &PublicRouteIntent{
+		Hostname:        "APPS.example.com",
+		Path:            "/api/",
+		AdditionalPaths: []string{"/hubs/notifications/", "/ws"},
+	}}).PublicRoute
+	if route.Hostname != "apps.example.com" || route.Path != "/api" || len(route.AdditionalPaths) != 2 || route.AdditionalPaths[0] != "/hubs/notifications" || route.AdditionalPaths[1] != "/ws" {
+		t.Fatalf("route=%+v", route)
+	}
+	if !route.HasPath("/hubs/notifications") || route.HasPath("/missing") {
+		t.Fatalf("unexpected alias membership: %+v", route)
+	}
+	if !route.Conflicts(PublicRouteIntent{Hostname: "apps.example.com", Path: "/hubs/notifications"}) || route.Conflicts(PublicRouteIntent{Hostname: "other.example.com", Path: "/hubs/notifications"}) {
+		t.Fatalf("unexpected route conflict result: %+v", route)
+	}
+}
+
 func TestDependencyStateHashDeterministic(t *testing.T) {
 	d1 := ServiceConfigurationDraft{
 		Dependencies: []ApplicationDependency{

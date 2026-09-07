@@ -9,7 +9,6 @@
   "k3s_installer_sha256": "REPLACE_WITH_64_HEX_K3S_INSTALLER_SHA256",
   "agent_install_url": "https://REPLACE_WITH_AGENT_ARTIFACT_HOST/path",
   "agent_install_sha256": "REPLACE_WITH_64_HEX_AGENT_SHA256",
-  "ssh_known_hosts_path": "/run/secrets/ssh_known_hosts",
   "production": false,
   "timeout": "10m",
   "staging_crash_barrier": {

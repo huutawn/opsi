@@ -41,6 +41,7 @@ test("Target reuses canonical bootstrap and resumes analysis when a runtime beco
   assert.match(source, /client\.placementFacts/);
   assert.match(source, /runtime\.status === "ready"/);
   assert.match(source, /deploymentRunAction\(projectID, run\.id, "analyze"/);
+	assert.match(source, /preserve_review:\s*true/);
   assert.match(source, /bootstrapActive\s*=\s*Boolean\(needsServer\s*&&\s*bootstrapSession/);
 });
 
@@ -118,6 +119,8 @@ test("Resource allocation proposal dialog and recommendation API integration", a
   assert.match(dialogSource, /projection\.system_reserve\.cpu_millicores/);
   assert.match(dialogSource, /projection\.available_for_run\.cpu_millicores/);
   assert.match(dialogSource, /projection\.remaining_after_proposal\.cpu_millicores/);
+	assert.match(dialogSource, /This proposal is already applied to the draft/);
+	assert.match(dialogSource, /alreadyApplied/);
 
   // Plan review separate request & limit inputs
   for (const label of ["CPU request (m)", "CPU limit (m)", "Memory request (MiB)", "Memory limit (MiB)", "Resource proposal"]) {

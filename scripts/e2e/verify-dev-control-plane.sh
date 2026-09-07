@@ -232,13 +232,10 @@ worker["agent_install_url"] = "https://example.invalid/opsi-agent"
 worker["agent_install_sha256"] = "0" * 64
 worker_dst.write_text(json.dumps(worker, indent=2) + "\n")
 PY
-  : >"$SECRETS_DIR/ssh_known_hosts"
   : >"$GITHUB_APP_KEY_FILE"
   chmod 0600 "$ENV_FILE" "$CLOUD_CONFIG" "$WORKER_CONFIG"
   chmod 0600 "$GITHUB_APP_KEY_FILE"
-  chmod 0640 "$SECRETS_DIR/ssh_known_hosts"
   [[ "$(stat -c '%a' "$SECRETS_DIR")" == "700" ]] || fail "secrets directory mode is not 0700"
-  [[ "$(stat -c '%a' "$SECRETS_DIR/ssh_known_hosts")" == "640" ]] || fail "ssh_known_hosts mode is not 0640"
   [[ "$(stat -c '%a' "$GITHUB_APP_KEY_FILE")" == "600" ]] || fail "GitHub App key placeholder mode is not 0600"
 }
 

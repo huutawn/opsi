@@ -339,12 +339,6 @@ func isBrowserRouteConsumer(text string) bool {
 }
 
 func markKafkaDisabled(result *Result, evidencePath string) {
-	for i := range result.Issues {
-		if result.Issues[i].Code == "KAFKA_UNSUPPORTED" {
-			result.Issues[i].Blocking = false
-			result.Issues[i].Resolution = "Kafka__Enabled=false"
-		}
-	}
 	for i := range result.Resources {
 		if result.Resources[i].Type != "kafka" {
 			continue

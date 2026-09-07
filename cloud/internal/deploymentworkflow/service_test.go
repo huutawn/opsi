@@ -22,7 +22,7 @@ func fixture(t *testing.T) (Service, Run, AuthorityRevisions) {
 	}
 	analysis := repositoryanalysis.Result{SchemaVersion: repositoryanalysis.SchemaVersion, RepositoryID: 1, Repository: "owner/repo", SelectedRef: "main", CommitSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Applications: []repositoryanalysis.Application{{SourceKey: "api", Key: "api", Name: "api", Root: ".", Port: 8080, Environment: map[string]string{"PORT": "8080"}, Build: repositoryanalysis.Build{Context: ".", DockerfilePath: "Dockerfile", Strategy: "dockerfile", Platform: "linux/amd64"}}}}
 	authority := AuthorityRevisions{SourceCommitSHA: analysis.CommitSHA, TopologyRevision: 3, TopologyHash: "topology"}
-	run, err = service.SetAnalysis(context.Background(), run.ProjectID, run.ID, analysis, authority, run.Plan.Target)
+	run, err = service.SetAnalysis(context.Background(), run.ProjectID, run.ID, analysis, authority, run.Plan.Target, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,6 +65,84 @@ func TestApprovalRejectsInvalidManagedStorageBeforeProvisioning(t *testing.T) {
 	}
 	if current.State != StateAwaitingApproval || current.Attempt != 0 || current.Approval != nil {
 		t.Fatalf("invalid plan crossed approval boundary: %+v", current)
+	}
+}
+
+func TestKafkaPlanRequiresSeparateExperimentalAcknowledgement(t *testing.T) {
+	service, run, _ := fixture(t)
+	draft := run.Plan
+	draft.Resources = []repositoryanalysis.Resource{{
+		LogicalName: "kafka", Type: "kafka", Managed: true, Required: true,
+		Persistence: &repositoryanalysis.Persistence{Persistent: true, SizeBytes: resourcev1.DefaultKafkaStorageBytes, PolicyRef: resourcev1.StoragePolicyDefault},
+		Settings:    map[string]string{"num_partitions": "3", "retention_hours": "168"},
+	}}
+	if err := refreshHash(&draft); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.UpdatePlan(context.Background(), run.ProjectID, run.ID, "user-1", run.Plan.Hash, draft); errorCode(err) != "DEPLOYMENT_PLAN_INVALID" {
+		t.Fatalf("missing acknowledgement error=%v", err)
+	}
+	draft.Resources[0].Acknowledgements = []string{"kafka_single_node_experimental"}
+	updated, err := service.UpdatePlan(context.Background(), run.ProjectID, run.ID, "user-1", run.Plan.Hash, draft)
+	if err != nil || updated.State != StateAwaitingApproval || len(updated.Plan.Resources[0].Acknowledgements) != 1 {
+		t.Fatalf("updated=%+v err=%v", updated, err)
+	}
+}
+
+func TestSameCommitAnalysisRefreshPreservesReviewedKafkaMappings(t *testing.T) {
+	service, run, authority := fixture(t)
+	draft := run.Plan
+	draft.Applications = append(draft.Applications, repositoryanalysis.Application{
+		SourceKey: "web", Key: "web", Name: "web", Root: "web", Port: 3000,
+		Build: repositoryanalysis.Build{Context: "web", DockerfilePath: "web/Dockerfile", Strategy: "dockerfile", Platform: "linux/amd64"},
+	})
+	draft.ApplicationEnvironmentReviews = []ApplicationEnvironmentReview{{ApplicationSourceKey: "web", NoEnvironmentRequired: true}}
+	draft.Resources = []repositoryanalysis.Resource{{
+		LogicalName: "kafka", Type: "kafka", Managed: true, Required: true,
+		Persistence:      &repositoryanalysis.Persistence{Persistent: true, SizeBytes: resourcev1.DefaultKafkaStorageBytes, PolicyRef: resourcev1.StoragePolicyDefault},
+		Settings:         map[string]string{"num_partitions": "3", "retention_hours": "168"},
+		Acknowledgements: []string{"kafka_single_node_experimental"},
+	}}
+	draft.Dependencies = []repositoryanalysis.Dependency{{
+		From: "api", To: "kafka", Protocol: "kafka", Required: true,
+		Injections: []repositoryanalysis.Injection{{EnvironmentName: "Kafka__BootstrapServers", SymbolicSource: "connection.kafka.bootstrap_servers"}},
+	}}
+	if err := refreshHash(&draft); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := service.UpdatePlan(context.Background(), run.ProjectID, run.ID, "user-1", run.Plan.Hash, draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	analysis := updated.Analysis
+	analysis.Applications = append(analysis.Applications, repositoryanalysis.Application{
+		SourceKey: "web", Key: "web", Name: "web", Root: "web", Port: 3000,
+		Build: repositoryanalysis.Build{Context: "web", DockerfilePath: "web/Dockerfile", Strategy: "dockerfile", Platform: "linux/amd64"},
+	})
+	analysis.Resources = []repositoryanalysis.Resource{{
+		LogicalName: "kafka", Type: "kafka", Managed: true, Required: true,
+		Persistence: &repositoryanalysis.Persistence{Persistent: true, SizeBytes: resourcev1.DefaultKafkaStorageBytes, PolicyRef: resourcev1.StoragePolicyDefault},
+		Settings:    map[string]string{"num_partitions": "3", "retention_hours": "168"},
+	}}
+	analysis.Dependencies = []repositoryanalysis.Dependency{{
+		From: "api", To: "kafka", Protocol: "kafka", Required: true,
+		Injections: []repositoryanalysis.Injection{
+			{EnvironmentName: "Kafka__BootstrapServers", SymbolicSource: "connection.kafka.bootstrap_servers"},
+			{EnvironmentName: "Kafka__SecurityProtocol", SymbolicSource: "connection.kafka.security_protocol"},
+		},
+	}}
+	refreshed, err := service.SetAnalysis(context.Background(), updated.ProjectID, updated.ID, analysis, authority, updated.Plan.Target, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refreshed.Plan.Dependencies) != 1 || len(refreshed.Plan.Dependencies[0].Injections) != 1 || refreshed.Plan.Dependencies[0].Injections[0].EnvironmentName != "Kafka__BootstrapServers" {
+		t.Fatalf("reviewed injection removal was not preserved: %+v", refreshed.Plan.Dependencies)
+	}
+	if len(refreshed.Plan.Resources) != 1 || len(refreshed.Plan.Resources[0].Acknowledgements) != 1 || refreshed.Plan.Resources[0].Acknowledgements[0] != "kafka_single_node_experimental" {
+		t.Fatalf("Kafka acknowledgement was not preserved: %+v", refreshed.Plan.Resources)
+	}
+	if len(refreshed.Plan.ApplicationEnvironmentReviews) != 1 || refreshed.Plan.ApplicationEnvironmentReviews[0].ApplicationSourceKey != "web" || !refreshed.Plan.ApplicationEnvironmentReviews[0].NoEnvironmentRequired {
+		t.Fatalf("runtime configuration confirmation was not preserved: %+v", refreshed.Plan.ApplicationEnvironmentReviews)
 	}
 }
 
@@ -138,7 +216,7 @@ func TestStaleRunCanBeAnalyzedAgainAndRequiresFreshApproval(t *testing.T) {
 	analysis := stale.Analysis
 	analysis.CommitSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	changed.SourceCommitSHA = analysis.CommitSHA
-	reviewed, err := service.SetAnalysis(context.Background(), stale.ProjectID, stale.ID, analysis, changed, stale.Plan.Target)
+	reviewed, err := service.SetAnalysis(context.Background(), stale.ProjectID, stale.ID, analysis, changed, stale.Plan.Target, false)
 	if err != nil {
 		t.Fatal(err)
 	}

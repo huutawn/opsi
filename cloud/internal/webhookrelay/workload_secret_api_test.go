@@ -98,7 +98,7 @@ func TestWorkloadSecretAPIRedactsValueScopesRolesAndReplays(t *testing.T) {
 			},
 		}},
 	}
-	if _, err = server.DeploymentRuns.SetAnalysis(context.Background(), project.ID, run.ID, analysis, deploymentworkflow.AuthorityRevisions{SourceCommitSHA: analysis.CommitSHA}, run.Plan.Target); err != nil {
+	if _, err = server.DeploymentRuns.SetAnalysis(context.Background(), project.ID, run.ID, analysis, deploymentworkflow.AuthorityRevisions{SourceCommitSHA: analysis.CommitSHA}, run.Plan.Target, false); err != nil {
 		t.Fatal(err)
 	}
 	plannedPath := "/api/projects/" + project.ID + "/applications/planned-app/workload-secrets"

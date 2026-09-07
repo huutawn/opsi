@@ -22,6 +22,7 @@ const (
 	ExecutorProviderGitHubActions = "github_actions"
 	RunnerOIDCAudience            = "opsi-build"
 	runnerLeaseTTL                = 10 * time.Minute
+	runnerClaimTimeout            = 10 * time.Minute
 
 	DispatchStateDispatching = "dispatching"
 	DispatchStateDispatched  = "dispatched"
@@ -299,6 +300,18 @@ func (s Service) Dispatch(ctx context.Context, projectID, applicationID, jobID s
 		return DispatchAttempt{}, err
 	}
 	return attempt, nil
+}
+
+// ExpireUnclaimedDispatch prevents an externally accepted workflow dispatch
+// from leaving a BuildJob pending forever when its runner never reaches Claim.
+// The timeout is deliberately bounded and terminal: a later runner is rejected
+// and an operator can retry from a fresh immutable deployment attempt.
+func (s Service) ExpireUnclaimedDispatch(ctx context.Context, projectID, applicationID, jobID string) (Job, bool, error) {
+	if s.Store == nil || !validOpaqueID(projectID) || !validOpaqueID(applicationID) || !validOpaqueID(jobID) {
+		return Job{}, false, invalid("BUILD_JOB_ID_INVALID", "project, application, or build job is invalid", "request")
+	}
+	now := s.clock()
+	return s.Store.ExpireUnclaimedDispatch(ctx, projectID, applicationID, jobID, now.Add(-runnerClaimTimeout), now)
 }
 
 func (s Service) Claim(ctx context.Context, jobID, attemptID string, identity RunnerIdentity) (RunnerLease, error) {

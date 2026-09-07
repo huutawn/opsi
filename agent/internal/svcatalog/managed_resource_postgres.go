@@ -118,7 +118,7 @@ const (
 )
 
 func managedCredentialRequired(resourceType resourcev1.Type) bool {
-	return resourceType == resourcev1.TypeRedis || resourceType == resourcev1.TypePostgres
+	return resourceType == resourcev1.TypeRedis || resourceType == resourcev1.TypePostgres || resourceType == resourcev1.TypeKafka
 }
 
 func managedResourcePVCName(spec resourcev1.ManagedResourceSpec) string {
@@ -146,7 +146,7 @@ func postgresManagedResourceObjects(spec resourcev1.ManagedResourceSpec, credent
 	}
 	pvc := map[string]any{
 		"apiVersion": "v1", "kind": "PersistentVolumeClaim",
-		"metadata": map[string]any{"name": pvcName, "namespace": namespace, "labels": managedResourceOwnershipLabels(spec), "annotations": postgresPVCAnnotations(spec)},
+		"metadata": map[string]any{"name": pvcName, "namespace": namespace, "labels": managedResourceOwnershipLabels(spec), "annotations": managedPVCAnnotations(spec)},
 		"spec": map[string]any{
 			"accessModes": []any{"ReadWriteOnce"},
 			"resources":   map[string]any{"requests": map[string]any{"storage": strconv.FormatInt(spec.Storage.SizeBytes, 10)}},
@@ -194,7 +194,7 @@ func postgresManagedResourceObjects(spec resourcev1.ManagedResourceSpec, credent
 	return []map[string]any{secret, pvc, statefulSet, service}
 }
 
-func postgresPVCAnnotations(spec resourcev1.ManagedResourceSpec) map[string]string {
+func managedPVCAnnotations(spec resourcev1.ManagedResourceSpec) map[string]string {
 	annotations := managedResourceOwnershipAnnotations(spec)
 	annotations["opsi.dev/storage-policy"] = spec.Storage.PolicyRef
 	annotations["opsi.dev/storage-size-bytes"] = strconv.FormatInt(spec.Storage.SizeBytes, 10)
@@ -202,7 +202,7 @@ func postgresPVCAnnotations(spec resourcev1.ManagedResourceSpec) map[string]stri
 	return annotations
 }
 
-func postgresPVCMatchesIntent(pvc map[string]any, spec resourcev1.ManagedResourceSpec) bool {
+func managedPVCMatchesIntent(pvc map[string]any, spec resourcev1.ManagedResourceSpec) bool {
 	annotations := stringMap(nested(pvc, "metadata", "annotations"))
 	return metadataString(pvc, "name") == managedResourcePVCName(spec) &&
 		annotations["opsi.dev/storage-policy"] == spec.Storage.PolicyRef &&
@@ -228,7 +228,7 @@ func (r ManagedResourceReconciler) observePostgres(ctx context.Context, spec res
 		return &resourcev1.ManagedResourceEvidence{}, managedResourceError{resourcev1.FailureSecretApplyFailed, "managed PostgreSQL server credential Secret is unavailable"}
 	}
 	pvc, err := r.get(ctx, "persistentvolumeclaim", managedResourcePVCName(spec), namespace)
-	if err != nil || pvc == nil || !exactManagedResourceOwnership(pvc, spec) || !postgresPVCMatchesIntent(pvc, spec) {
+	if err != nil || pvc == nil || !exactManagedResourceOwnership(pvc, spec) || !managedPVCMatchesIntent(pvc, spec) {
 		return &resourcev1.ManagedResourceEvidence{}, err
 	}
 	podsRaw, err := r.run(ctx, nil, "get", "pods", "-n", namespace, "-l", selectorString(managedResourceLabels(spec)), "-o", "json")

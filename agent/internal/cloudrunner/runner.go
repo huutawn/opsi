@@ -119,6 +119,8 @@ type NodeLifecycleExecutor interface {
 
 const rolloutReconcileAttempts = 2
 const defaultBackupHeartbeat = time.Minute
+const cloudHeartbeatTimeout = 15 * time.Second
+const cloudPollTimeoutMargin = 15 * time.Second
 
 func (r Runner) Run(ctx context.Context) error {
 	if r.Client == nil || r.Engine == nil {
@@ -162,13 +164,15 @@ func (r Runner) heartbeatLoop(ctx context.Context) {
 }
 
 func (r Runner) sendHeartbeat(ctx context.Context) {
-	health := ProbeRuntime(ctx, r.HealthProbe)
-	err := r.Client.Heartbeat(ctx, r.NodeID, cloudrelay.Heartbeat{
+	requestCtx, cancel := context.WithTimeout(ctx, cloudHeartbeatTimeout)
+	defer cancel()
+	health := ProbeRuntime(requestCtx, r.HealthProbe)
+	err := r.Client.Heartbeat(requestCtx, r.NodeID, cloudrelay.Heartbeat{
 		Version:      r.Version,
 		NodeReady:    health.NodeReady,
 		K3SStatus:    health.K3SStatus,
 		Capacity:     health.Capacity,
-		Capabilities: map[string]any{"deploy": health.NodeReady && r.Engine != nil, "node_lifecycle": r.NodeLifecycle != nil, "managed_resources": health.NodeReady && r.ManagedResources != nil, "postgres_logical_backup": health.NodeReady && r.Backups != nil, "postgres_logical_restore": health.NodeReady && r.Restores != nil, "dep_verification": health.NodeReady && r.DepVerifier != nil},
+		Capabilities: map[string]any{"deploy": health.NodeReady && r.Engine != nil, "node_lifecycle": r.NodeLifecycle != nil, "managed_resources": health.NodeReady && r.ManagedResources != nil, "managed_kafka": health.NodeReady && r.ManagedResources != nil, "postgres_logical_backup": health.NodeReady && r.Backups != nil, "postgres_logical_restore": health.NodeReady && r.Restores != nil, "dep_verification": health.NodeReady && r.DepVerifier != nil},
 	})
 	if err != nil {
 		r.ConnectionState.SetConnected(false)
@@ -187,7 +191,9 @@ func (r Runner) jobLoop(ctx context.Context) error {
 			return ctx.Err()
 		case <-timer.C:
 		}
-		lease, err := r.Client.PollJob(ctx, r.NodeID, r.LongPollWait)
+		requestCtx, cancel := context.WithTimeout(ctx, r.LongPollWait+cloudPollTimeoutMargin)
+		lease, err := r.Client.PollJob(requestCtx, r.NodeID, r.LongPollWait)
+		cancel()
 		if err != nil {
 			r.ConnectionState.SetConnected(false)
 			r.log().Warn("cloud job poll failed", "error", err)

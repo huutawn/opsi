@@ -35,7 +35,6 @@ REQUIRED_SECRET_NAMES = (
     "github-app-client-secret",
     "github-app-private-key",
     "github-app-webhook-secret",
-    "ssh-known-hosts",
     "origin-certificate",
     "origin-private-key",
 )
@@ -49,7 +48,6 @@ SECRET_FILE_NAMES = {
     "github-app-client-secret": "github-app-client-secret",
     "github-app-private-key": "github-app-private-key.pem",
     "github-app-webhook-secret": "github-app-webhook-secret",
-    "ssh-known-hosts": "ssh_known_hosts",
     "origin-certificate": "origin-certificate.pem",
     "origin-private-key": "origin-private-key.pem",
 }
@@ -289,7 +287,7 @@ def validate_source_texts(
         fail("private-key mounts must be read-only")
     for service, required in {
         "cloud": ("database-url", "bootstrap-worker-token", "bootstrap-secret-key", "github-app-private-key"),
-        "bootstrap-worker": ("bootstrap-worker-token", "ssh-known-hosts"),
+        "bootstrap-worker": ("bootstrap-worker-token",),
         "reverse-proxy": ("origin-certificate", "origin-private-key"),
     }.items():
         for secret in required:
@@ -402,8 +400,6 @@ def validate_runtime_values(env: dict[str, str], cloud: dict[str, object], worke
     for name in ("origin-private-key", "github-app-private-key"):
         if PRIVATE_KEY_MARKER not in secrets[name] or is_placeholder(secrets[name]):
             fail(f"runtime {name} is not private-key PEM data")
-    if not secrets["ssh-known-hosts"].strip():
-        fail("runtime ssh-known-hosts must not be empty")
 
 
 def validate_permissions(path: pathlib.Path, private: bool = False, owner_uid: int | None = None) -> None:
@@ -457,7 +453,7 @@ def validate_runtime() -> None:
         path = DEPLOY / "secrets" / filename
         validate_permissions(
             path,
-            private=name not in {"origin-certificate", "ssh-known-hosts"},
+            private=name != "origin-certificate",
             owner_uid=None if name == "postgres-password" else 1000,
         )
         secrets[name] = read_required(path)

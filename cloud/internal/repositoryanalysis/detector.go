@@ -209,6 +209,7 @@ func (d Detector) Analyze(ctx context.Context, request Request) (Result, error) 
 	canonicalizeResult(request.Repository, &result)
 	enrichApplications(&result, fileSet, read)
 	inferDependencies(&result, analysisFiles, read)
+	mergeManagedDependencies(&result)
 	validateDetected(&result)
 	if len(truncationReasons) > 0 {
 		result.Truncated = true
@@ -263,12 +264,13 @@ func firstTruncationReason(reasons map[string]bool) string {
 type explicitConfig struct {
 	Version   int `yaml:"version"`
 	Resources []struct {
-		LogicalName string            `yaml:"logicalName"`
-		Type        string            `yaml:"type"`
-		Managed     bool              `yaml:"managed"`
-		Required    bool              `yaml:"required"`
-		Persistence *Persistence      `yaml:"persistence"`
-		Settings    map[string]string `yaml:"settings"`
+		LogicalName string                  `yaml:"logicalName"`
+		Type        string                  `yaml:"type"`
+		Managed     bool                    `yaml:"managed"`
+		Required    bool                    `yaml:"required"`
+		Persistence *Persistence            `yaml:"persistence"`
+		Settings    map[string]string       `yaml:"settings"`
+		Topics      []resourcev1.KafkaTopic `yaml:"topics"`
 	} `yaml:"resources"`
 	Services []struct {
 		Key          string                                         `yaml:"key"`
@@ -346,7 +348,7 @@ func parseExplicit(data []byte, files map[string]File) (explicitResult, error) {
 		}
 		resourceNames[resource.LogicalName] = true
 		evidence := Evidence{Path: ".opsi/opsi-cd.yaml", Kind: "explicit_config", Reason: "Resource intent is declared by the repository owner.", Confidence: ConfidenceHigh}
-		result.Resources = append(result.Resources, Resource{LogicalName: resource.LogicalName, Type: resource.Type, Managed: resource.Managed, Required: resource.Required, Persistence: resource.Persistence, Settings: resource.Settings, Confidence: ConfidenceHigh, Reason: evidence.Reason, Evidence: []Evidence{evidence}})
+		result.Resources = append(result.Resources, Resource{LogicalName: resource.LogicalName, Type: resource.Type, Managed: resource.Managed, Required: resource.Required, Persistence: resource.Persistence, Settings: resource.Settings, Topics: resource.Topics, Confidence: ConfidenceHigh, Reason: evidence.Reason, Evidence: []Evidence{evidence}})
 	}
 	for _, service := range cfg.Services {
 		if !validKey(service.Key) || seen[service.Key] {
@@ -422,7 +424,6 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 	resources := []Resource{}
 	deps := []Dependency{}
 	issues := []Issue{}
-	kafkaIssueAdded := false
 	kafkaDisabled := false
 	resourceNames := map[string]string{}
 	resourceLogicalNames := map[string]string{}
@@ -434,6 +435,8 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 			DependsOn   yaml.Node `yaml:"depends_on"`
 			Environment yaml.Node `yaml:"environment"`
 			Volumes     []string  `yaml:"volumes"`
+			Entrypoint  yaml.Node `yaml:"entrypoint"`
+			Command     yaml.Node `yaml:"command"`
 			Healthcheck struct {
 				Test []string `yaml:"test"`
 			} `yaml:"healthcheck"`
@@ -448,21 +451,33 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 				logicalName = "kafka"
 			}
 			recommendation := "Managed " + displayResource(kind)
-			if kind == "kafka" {
-				recommendation = "Set Kafka__Enabled=false unless an external Kafka endpoint is supplied"
-				if !kafkaIssueAdded {
-					issues = append(issues, Issue{Code: "KAFKA_UNSUPPORTED", Message: "Kafka was detected but is not a managed Opsi resource.", Path: composePath, Resolution: recommendation, Blocking: true})
-					kafkaIssueAdded = true
-				}
-			}
 			evidence := Evidence{Path: composePath, Kind: "compose_image", Reason: "Compose declares image " + service.Image + ".", Confidence: ConfidenceHigh}
 			var persistence *Persistence
-			if (len(service.Volumes) > 0 || kind == "postgres") && kind != "kafka" {
-				persistence = &Persistence{Persistent: true, SizeBytes: resourcev1.DefaultPostgresStorageBytes, PolicyRef: resourcev1.StoragePolicyDefault}
+			if len(service.Volumes) > 0 || kind == "postgres" || kind == "kafka" {
+				storageBytes := resourcev1.DefaultPostgresStorageBytes
+				if kind == "kafka" {
+					storageBytes = resourcev1.DefaultKafkaStorageBytes
+				}
+				persistence = &Persistence{Persistent: true, SizeBytes: storageBytes, PolicyRef: resourcev1.StoragePolicyDefault}
 				if len(service.Volumes) > 0 {
 					evidence.Reason += " A persistent volume is mounted."
-				} else {
+				} else if kind == "postgres" {
 					evidence.Reason += " PostgreSQL uses persistent managed storage by default."
+				} else if kind == "kafka" {
+					evidence.Reason += " Kafka uses persistent managed storage by default."
+				}
+			}
+			var settings map[string]string
+			var topics []resourcev1.KafkaTopic
+			if kind == "kafka" {
+				composeEnv, _ := composeEnvironment(service.Environment)
+				settings = extractKafkaComposeSettings(composeEnv)
+				if strings.HasPrefix(name, "kafka-init") {
+					var topicErr error
+					topics, topicErr = extractKafkaComposeTopics(service.Entrypoint, service.Command)
+					if topicErr != nil {
+						issues = append(issues, Issue{Code: "KAFKA_TOPIC_INIT_UNSUPPORTED", Message: "Kafka topic initialization must use a direct kafka-topics.sh command list.", Path: composePath, Resolution: "Declare topics in the Opsi plan review instead of executing a shell command.", Blocking: false})
+					}
 				}
 			}
 			merged := false
@@ -470,12 +485,23 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 				if resources[i].LogicalName == logicalName && resources[i].Type == kind {
 					resources[i].Evidence = append(resources[i].Evidence, evidence)
 					resources[i].Reason += " " + evidence.Reason
+					if len(settings) > 0 {
+						if resources[i].Settings == nil {
+							resources[i].Settings = map[string]string{}
+						}
+						for sk, sv := range settings {
+							resources[i].Settings[sk] = sv
+						}
+					}
+					if len(topics) > 0 {
+						resources[i].Topics, issues = mergeKafkaTopics(resources[i].Topics, topics, issues, composePath)
+					}
 					merged = true
 					break
 				}
 			}
 			if !merged {
-				resources = append(resources, Resource{LogicalName: logicalName, Type: kind, Managed: kind != "kafka", Required: kind != "kafka", Persistence: persistence, Recommendation: recommendation, Confidence: ConfidenceHigh, Reason: evidence.Reason, Evidence: []Evidence{evidence}})
+				resources = append(resources, Resource{LogicalName: logicalName, Type: kind, Managed: true, Required: true, Persistence: persistence, Settings: settings, Topics: topics, Recommendation: recommendation, Confidence: ConfidenceHigh, Reason: evidence.Reason, Evidence: []Evidence{evidence}})
 			}
 			resourceNames[name] = kind
 			resourceLogicalNames[name] = logicalName
@@ -519,7 +545,7 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 			if resourceLogicalNames[target] != "" {
 				logicalTarget = resourceLogicalNames[target]
 			}
-			dependency := Dependency{From: slug(name), To: logicalTarget, Protocol: protocol, Required: protocol != "http" && protocol != "kafka", Confidence: ConfidenceHigh, Reason: evidence.Reason, Evidence: []Evidence{evidence}}
+			dependency := Dependency{From: slug(name), To: logicalTarget, Protocol: protocol, Required: protocol != "http", Confidence: ConfidenceHigh, Reason: evidence.Reason, Evidence: []Evidence{evidence}}
 			dependency.Injections = composeInjections(node, protocol)
 			if contract := composeHealthVerification(node); contract != nil {
 				dependency.Verification = contract
@@ -527,13 +553,8 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 			deps = append(deps, dependency)
 		}
 	}
+	RemoveManagedDependencyEnvironmentKeys(apps, deps)
 	if kafkaDisabled {
-		for i := range issues {
-			if issues[i].Code == "KAFKA_UNSUPPORTED" {
-				issues[i].Blocking = false
-				issues[i].Resolution = "Kafka__Enabled=false"
-			}
-		}
 		for i := range resources {
 			if resources[i].Type == "kafka" {
 				resources[i].Managed = false
@@ -541,8 +562,113 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 				resources[i].Recommendation = "Detected but disabled by Kafka__Enabled=false"
 			}
 		}
+		for i := range deps {
+			if deps[i].Protocol == "kafka" || deps[i].To == "kafka" {
+				deps[i].Required = false
+			}
+		}
+	}
+	for i := range resources {
+		if resources[i].Type == "kafka" {
+			sort.Slice(resources[i].Topics, func(a, b int) bool { return resources[i].Topics[a].Name < resources[i].Topics[b].Name })
+		}
 	}
 	return apps, resources, deps, issues
+}
+
+func extractKafkaComposeTopics(entrypoint, command yaml.Node) ([]resourcev1.KafkaTopic, error) {
+	args, ok := yamlStringList(entrypoint)
+	if !ok || len(args) != 1 || !strings.HasSuffix(args[0], "/kafka-topics.sh") {
+		return nil, errors.New("entrypoint is not kafka-topics.sh")
+	}
+	args, ok = yamlStringList(command)
+	if !ok {
+		return nil, errors.New("command is not a list")
+	}
+	values := map[string]string{}
+	create, idempotent := false, false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--create":
+			create = true
+		case "--if-not-exists":
+			idempotent = true
+		case "--bootstrap-server", "--topic", "--partitions", "--replication-factor":
+			if i+1 >= len(args) || values[args[i]] != "" {
+				return nil, errors.New("invalid topic argument")
+			}
+			i++
+			values[args[i-1]] = args[i]
+		default:
+			return nil, errors.New("unsupported topic command argument")
+		}
+	}
+	partitions, err := strconv.ParseInt(values["--partitions"], 10, 32)
+	if !create || !idempotent || values["--bootstrap-server"] == "" || values["--topic"] == "" || values["--replication-factor"] != "1" || err != nil {
+		return nil, errors.New("invalid topic command")
+	}
+	topic := resourcev1.KafkaTopic{Name: values["--topic"], Partitions: int32(partitions)}
+	if err := resourcev1.ValidateKafkaTopics([]resourcev1.KafkaTopic{topic}); err != nil {
+		return nil, err
+	}
+	return []resourcev1.KafkaTopic{topic}, nil
+}
+
+func yamlStringList(node yaml.Node) ([]string, bool) {
+	if node.Kind != yaml.SequenceNode {
+		return nil, false
+	}
+	values := make([]string, 0, len(node.Content))
+	for _, value := range node.Content {
+		if value.Kind != yaml.ScalarNode || value.Tag != "!!str" {
+			return nil, false
+		}
+		values = append(values, value.Value)
+	}
+	return values, true
+}
+
+func mergeKafkaTopics(existing, incoming []resourcev1.KafkaTopic, issues []Issue, composePath string) ([]resourcev1.KafkaTopic, []Issue) {
+	byName := make(map[string]resourcev1.KafkaTopic, len(existing)+len(incoming))
+	for _, topic := range existing {
+		byName[topic.Name] = topic
+	}
+	for _, topic := range incoming {
+		if prior, ok := byName[topic.Name]; ok && prior != topic {
+			issues = append(issues, Issue{Code: "KAFKA_TOPIC_CONFLICT", Message: "Kafka topic declarations disagree across Compose services.", Path: composePath, Resolution: "Select one partition count in the plan review.", Blocking: true})
+			continue
+		}
+		byName[topic.Name] = topic
+	}
+	result := make([]resourcev1.KafkaTopic, 0, len(byName))
+	for _, topic := range byName {
+		result = append(result, topic)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result, issues
+}
+
+func extractKafkaComposeSettings(env map[string]string) map[string]string {
+	if len(env) == 0 {
+		return nil
+	}
+	settings := map[string]string{}
+	for k, v := range env {
+		switch k {
+		case "KAFKA_NUM_PARTITIONS":
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 1 && n <= 100 {
+				settings["num_partitions"] = strconv.FormatInt(n, 10)
+			}
+		case "KAFKA_LOG_RETENTION_HOURS":
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 1 && n <= 8760 {
+				settings["retention_hours"] = strconv.FormatInt(n, 10)
+			}
+		}
+	}
+	if len(settings) == 0 {
+		return nil
+	}
+	return settings
 }
 
 func kafkaEnvironmentDisabled(environment map[string]string) bool {
@@ -981,7 +1107,7 @@ func validateDetected(result *Result) {
 		if !dependency.Required {
 			continue
 		}
-		if dependency.Protocol != "postgres" && dependency.Protocol != "redis" && dependency.Protocol != "nats" && dependency.Verification == nil {
+		if dependency.Protocol != "postgres" && dependency.Protocol != "redis" && dependency.Protocol != "nats" && dependency.Protocol != "kafka" && dependency.Verification == nil {
 			result.Issues = append(result.Issues, Issue{Code: "DEPENDENCY_VERIFICATION_REQUIRED", Message: "Required dependency " + dependency.From + " → " + dependency.To + " has no verification contract.", Resolution: "Add a consumer HTTP verification contract or mark the dependency optional.", Blocking: true})
 		}
 	}

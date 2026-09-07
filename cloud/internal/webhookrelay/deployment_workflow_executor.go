@@ -216,13 +216,24 @@ func (e deploymentWorkflowExecutor) build(ctx context.Context, run deploymentwor
 		}
 		refs.Checkpoints = append(refs.Checkpoints, deploymentworkflow.Checkpoint(deploymentworkflow.AuthorityBuildJob, job.ID, 0, authorityStateHash(job), deploymentworkflow.StateBuilding))
 		if job.Status == buildjob.StatusReady {
-			if _, dispatchErr := e.server.BuildJobs.Dispatch(ctx, run.ProjectID, applicationID, job.ID); dispatchErr != nil {
+			var expired bool
+			job, expired, err = e.server.BuildJobs.ExpireUnclaimedDispatch(ctx, run.ProjectID, applicationID, job.ID)
+			if err != nil {
+				return workflowFailure(err, "BUILD_READ_FAILED", "Retry after BuildJob storage is restored."), err
+			}
+			if expired {
+				// Fall through so the terminal BuildJob produces its canonical,
+				// actionable deployment failure in this same controller pass.
+			} else if _, dispatchErr := e.server.BuildJobs.Dispatch(ctx, run.ProjectID, applicationID, job.ID); dispatchErr != nil {
 				if buildjob.Code(dispatchErr) != "DUPLICATE_ACTIVE_DISPATCH" {
 					return workflowFailure(dispatchErr, "BUILD_DISPATCH_FAILED", "Restore the configured build executor and retry."), dispatchErr
 				}
+				pending = true
+				continue
+			} else {
+				pending = true
+				continue
 			}
-			pending = true
-			continue
 		}
 		job, err = e.server.BuildJobs.Get(ctx, run.ProjectID, applicationID, job.ID)
 		if err != nil {

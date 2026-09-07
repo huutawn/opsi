@@ -158,7 +158,7 @@ func TestResourceAPIRejectsUnknownJSONAndType(t *testing.T) {
 	if plaintext.Code != http.StatusBadRequest || !strings.Contains(plaintext.Body.String(), "INVALID_RESOURCE_JSON") {
 		t.Fatalf("status=%d body=%s", plaintext.Code, plaintext.Body.String())
 	}
-	unknownType := requestResourceAPI(t, server, http.MethodPost, path, `{"environment_id":"`+facts.Environments[0].ID+`","name":"kafka","kind":"managed_service","type":"kafka","managed":{"type":"kafka","replicas":1,"cpu_millicores":100,"memory_bytes":1024,"storage":{"persistent":true,"size_bytes":1024},"credential_refs":[{"secret_id":"vault-kafka"}],"connection_policy":{"mode":"internal"}}}`, "unknown-type")
+	unknownType := requestResourceAPI(t, server, http.MethodPost, path, `{"environment_id":"`+facts.Environments[0].ID+`","name":"cassandra","kind":"managed_service","type":"cassandra","managed":{"type":"cassandra","replicas":1,"cpu_millicores":100,"memory_bytes":1024,"storage":{"persistent":true,"size_bytes":1024},"credential_refs":[{"secret_id":"vault-cassandra"}],"connection_policy":{"mode":"internal"}}}`, "unknown-type")
 	if unknownType.Code != http.StatusBadRequest || !strings.Contains(unknownType.Body.String(), "RESOURCE_TYPE_UNSUPPORTED") {
 		t.Fatalf("status=%d body=%s", unknownType.Code, unknownType.Body.String())
 	}

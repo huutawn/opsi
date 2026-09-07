@@ -228,7 +228,7 @@ func (e deploymentWorkflowExecutor) ensureResources(ctx context.Context, run dep
 	result := map[string]resourcev1.Resource{}
 	ids := []string{}
 	for _, detected := range run.Plan.Resources {
-		if !detected.Managed || detected.Type == "kafka" {
+		if !detected.Managed {
 			continue
 		}
 		value := byName[detected.LogicalName]
@@ -252,7 +252,7 @@ func (e deploymentWorkflowExecutor) ensureResources(ctx context.Context, run dep
 			managedCPU, managedMemory := deploymentworkflow.PlannedManagedResourceCapacity(detected.Type)
 			value, _, err = e.server.Resources.Create(ctx, run.ProjectID, run.CreatedBy, workflowExecutionKey(run, "resource", detected.LogicalName), resourcev1.CreateRequest{
 				EnvironmentID: run.Plan.Target.EnvironmentID, Name: detected.LogicalName, Kind: resourcev1.KindManagedService, Type: resourceType,
-				Managed: &resourcev1.ManagedSpec{Type: resourceType, Version: version.Version, Profile: profile.Name, Replicas: 1, CPUMillicores: managedCPU, MemoryBytes: managedMemory, Storage: storage, ServiceConfig: detected.Settings, ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"}},
+				Managed: &resourcev1.ManagedSpec{Type: resourceType, Version: version.Version, Profile: profile.Name, Replicas: 1, CPUMillicores: managedCPU, MemoryBytes: managedMemory, Storage: storage, ServiceConfig: detected.Settings, Topics: append([]resourcev1.KafkaTopic(nil), detected.Topics...), ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"}},
 			})
 			if err != nil {
 				return result, ids, err
@@ -400,9 +400,9 @@ func (e deploymentWorkflowExecutor) ensureConfigurations(ctx context.Context, ru
 		}
 		if applicationExposure(run, key) == "public" && applicationHostname(run, key) != "" {
 			if existing := manualRoutes[service.ID]; existing != nil && (existing.Metadata == nil || existing.Metadata.Rationale != automaticPublicRouteRationale) {
-				draft.PublicRoute = &serviceconfigurationv1.PublicRouteIntent{Hostname: existing.Hostname, Path: existing.Path}
+				draft.PublicRoute = &serviceconfigurationv1.PublicRouteIntent{Hostname: existing.Hostname, Path: existing.Path, AdditionalPaths: append([]string(nil), existing.AdditionalPaths...)}
 			} else {
-				draft.PublicRoute = &serviceconfigurationv1.PublicRouteIntent{Hostname: applicationHostname(run, key), Path: applicationPath(run, key)}
+				draft.PublicRoute = &serviceconfigurationv1.PublicRouteIntent{Hostname: applicationHostname(run, key), Path: applicationPath(run, key), AdditionalPaths: applicationAdditionalPaths(run, key)}
 			}
 		}
 		for _, secret := range run.Plan.Secrets {

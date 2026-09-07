@@ -132,7 +132,7 @@ type RetainedStorageDestroySpec struct {
 }
 
 func (s RetainedStorageDestroySpec) Validate() error {
-	if s.SchemaVersion != RetainedStorageSchemaVersion || s.Operation != "destroy" || s.RetainedStorageID == "" || s.OriginalResourceID == "" || s.ProjectID == "" || s.EnvironmentID == "" || s.ResourceType != TypePostgres {
+	if s.SchemaVersion != RetainedStorageSchemaVersion || s.Operation != "destroy" || s.RetainedStorageID == "" || s.OriginalResourceID == "" || s.ProjectID == "" || s.EnvironmentID == "" || (s.ResourceType != TypePostgres && s.ResourceType != TypeKafka) {
 		return errors.New("retained storage identity is invalid")
 	}
 	if s.Namespace == "" || s.PVCName == "" || s.PVCUID == "" || s.PVName == "" || s.StorageClass == "" || s.ReclaimPolicy == "" || len(s.StorageHash) != 64 || s.Revision < 1 {

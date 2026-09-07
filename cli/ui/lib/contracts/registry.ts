@@ -58,7 +58,8 @@ export type ServiceRecord = {
 
 export type RepositoryEvidence = { path: string; kind: string; reason: string; confidence: "high" | "medium" | "low" };
 export type DetectedApplication = { source_key: string; key: string; name: string; root: string; port?: number; environment?: Record<string,string>; capacity?: { replicas?: number; cpu_milli?: number; memory_bytes?: number; cpu_limit_milli?: number; memory_limit_bytes?: number }; exposure?: { mode?: string; hostname?: string; path?: string; automatic?: boolean }; build: { context: string; dockerfile_path?: string; strategy: string; platform: string; image?: string }; confidence: string; reason: string; evidence: RepositoryEvidence[] };
-export type DetectedResource = { logical_name: string; type: string; managed: boolean; required: boolean; persistence?: { persistent: boolean; size_bytes?: number; policy_ref?: string }; settings?: Record<string,string>; recommendation?: string; confidence: string; reason: string; evidence: RepositoryEvidence[] };
+export type KafkaTopic = { name: string; partitions: number; retention_hours?: number };
+export type DetectedResource = { logical_name: string; type: string; managed: boolean; required: boolean; persistence?: { persistent: boolean; size_bytes?: number; policy_ref?: string }; settings?: Record<string,string>; topics?: KafkaTopic[]; acknowledgements?: string[]; recommendation?: string; confidence: string; reason: string; evidence: RepositoryEvidence[] };
 export type DependencyVerification = { type: string; path?: string; expected_status?: number };
 export type DetectedDependency = { from: string; to: string; protocol: string; strategy?: string; path?: string; required: boolean; injections?: Array<{ environment_name: string; symbolic_source: string; template?: string }>; verification?: DependencyVerification; confidence: string; reason: string; evidence: RepositoryEvidence[] };
 export type DetectedBinding = { from: string; to: string; kind: string; path?: string; confidence: string; reason: string; evidence: RepositoryEvidence[] };
@@ -872,12 +873,42 @@ export type IncidentEvidence = {
   content_sha256: string;
 };
 
+export type SSHHostKeyTrust = {
+  id: string;
+  project_id: string;
+  host: string;
+  port: number;
+  algorithm: string;
+  fingerprint: string;
+  status: "active" | "superseded";
+  created_at: string;
+  superseded_at?: string;
+};
+
+export type SSHHostKeyObservation = {
+  id: string;
+  probe_id: string;
+  project_id: string;
+  public_host: string;
+  ssh_port: number;
+  resolved_ip: string;
+  algorithm: string;
+  fingerprint: string;
+  trust_state: "first_seen" | "matched" | "changed";
+  previous_fingerprint?: string;
+  status: "pending" | "confirmed" | "consumed" | "expired";
+  expires_at: string;
+  created_at: string;
+};
+
 export type BootstrapSession = {
   id: string;
   status: string;
   public_host?: string;
+  resolved_ip?: string;
   role: string;
   auth_method?: string;
+  ssh_host_key_trust_id?: string;
   bootstrap_command?: string;
   attempt_count?: number;
   max_attempts?: number;
@@ -890,7 +921,6 @@ export type BootstrapSession = {
   };
   created_at: string;
 };
-
 export type AuditEvent = {
   id: string;
   actor_user_id?: string;
@@ -1136,6 +1166,21 @@ export type UpdateResourceRequest = {
   external?: Record<string, unknown>;
 };
 
+export type ConfigPropertyMetadata = {
+  name: string;
+  type: "int" | "string" | "bool";
+  default: string;
+  description?: string;
+  min?: number;
+  max?: number;
+};
+
+export type ProfileResourceDefaults = {
+  cpu_millicores: number;
+  memory_bytes: number;
+  storage_bytes: number;
+};
+
 export type ResourceTypeDefinition = {
   type: string;
   display_name: string;
@@ -1148,7 +1193,15 @@ export type ResourceTypeDefinition = {
   credential_keys: string[];
   generated_values: Array<{ name: string; sensitivity: "non_secret" | "secret" }>;
   storage: { supported: boolean; required: boolean };
-  provisioning: { implemented: boolean; profiles: Array<{ name: string; versions: Array<{ version: string; image: string }> }> };
+  provisioning: {
+    implemented: boolean;
+    profiles: Array<{
+      name: string;
+      resource_defaults?: ProfileResourceDefaults;
+      config_metadata?: ConfigPropertyMetadata[];
+      versions: Array<{ version: string; image: string }>;
+    }>;
+  };
 };
 
 export type ResourceBinding = {

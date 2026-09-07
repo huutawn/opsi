@@ -122,6 +122,66 @@ test("SSH bootstrap reports live progress and resumes analysis when the runtime 
 	runtimeStatus = "ready";
 	await expect(page.getByRole("button", { name: "Approve & Deploy" })).toBeVisible({ timeout: 8_000 });
 });
+test("SSH host-key probe displays TOFU indicator and pins identity on first connection", async ({ page }) => {
+	const run = deploymentRun("awaiting_input");
+	(run.plan.issues as Array<Record<string, unknown>>).push({ code: "TARGET_SERVER_REQUIRED", message: "No Ready project server is available.", resolution: "Connect a server.", blocking: true });
+	await mockDeployAPI(page, () => run, () => run, "owner", undefined, {
+		repository: () => sourceRepository("active"),
+		placement: () => ({ ...placementFacts(), runtimes: [{ ...placementFacts().runtimes[0], status: "provisioning" }] }),
+	});
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await page.getByRole("button", { name: "Connect server" }).click();
+	await expect(page.getByRole("heading", { name: "Connect Server" })).toBeVisible();
+
+	// Open Advanced details and select SSH Password method
+	await page.getByText("Advanced: Bootstrap over SSH").click();
+	await page.getByRole("radio", { name: "SSH Password" }).click();
+	await page.getByRole("textbox", { name: "Server IP or hostname" }).fill("203.0.113.10");
+	await page.getByRole("textbox", { name: "Server IP or hostname" }).blur();
+	// Wait for TOFU indicator
+	await expect(page.getByText("First Connection (TOFU)")).toBeVisible();
+	await expect(page.getByText("SHA256:4t7EExampleMockFingerprintAAAA")).toBeVisible();
+	await expect(page.getByRole("button", { name: "Connect server over SSH" })).toBeEnabled();
+});
+
+test("waiting_host_key_confirmation displays alert and resumes via rotation dialog", async ({ page }) => {
+	const run = deploymentRun("awaiting_input");
+	run.plan.issues.push({ code: "TARGET_SERVER_REQUIRED", message: "No Ready project server is available.", resolution: "Connect a server.", blocking: true });
+	let bootstrapStatus = "waiting_host_key_confirmation";
+	let resumed = false;
+
+	await mockDeployAPI(page, () => run, () => run, "owner", undefined, {
+		repository: () => sourceRepository("active"),
+		bootstrapSession: () => ({ id: "boot-1", status: bootstrapStatus, public_host: "103.252.137.163", role: "first_server", auth_method: "password", attempt_count: 1, max_attempts: 3, created_at: "2026-08-25T00:00:00Z" }),
+		bootstrapEvents: () => [{ id: "evt-mismatch", step: "SSH_HOST_KEY_MISMATCH", message_redacted: "SSH host-key mismatch detected", progress_percent: 25, created_at: "2026-08-25T00:00:01Z" }],
+		placement: () => ({ ...placementFacts(), runtimes: [{ ...placementFacts().runtimes[0], status: "provisioning" }] }),
+		onResume: () => {
+			resumed = true;
+			bootstrapStatus = "pending";
+		},
+	});
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await expect(page.getByRole("button", { name: "Review & Resume" })).toBeVisible();
+
+	// Click Review & Resume
+	await page.getByRole("button", { name: "Review & Resume" }).click();
+	const rotationDialog = page.getByRole("dialog");
+	await expect(rotationDialog.getByRole("heading", { name: "Confirm Host Key & Resume" })).toBeVisible();
+
+	// Check verification consent inside dialog
+	await rotationDialog.getByRole("checkbox").check();
+
+	// Fill new password
+	await rotationDialog.getByPlaceholder("Enter password").fill("new-secret-password");
+
+	// Click Confirm & Resume Session
+	await rotationDialog.getByRole("button", { name: "Confirm & Resume Session" }).click();
+
+	await expect(rotationDialog).not.toBeVisible();
+	expect(resumed).toBe(true);
+});
 
 test("truncated analysis submits a canonical scope on the same run", async ({ page }) => {
 	let run = deploymentRun("awaiting_input");
@@ -516,7 +576,7 @@ test("multi-app runtime configuration enforces review gating, generated key suff
 	await expect(page.getByText('Review required: "identity-web" requires runtime configuration or confirmation.')).toHaveCount(0);
 });
 
-test("removing the last runtime key forces confirmation review again and blocks save", async ({ page }) => {
+test("removing the last runtime key forces confirmation review again but still permits saving the draft", async ({ page }) => {
 	const run = deploymentRun("awaiting_approval");
 	run.plan.applications[1].environment = { FEATURE_FLAG: "true" };
 	run.plan.application_environment_reviews = [];
@@ -531,7 +591,33 @@ test("removing the last runtime key forces confirmation review again and blocks 
 
 	await webRuntime.getByRole("button", { name: "Remove" }).click();
 	await expect(webRuntime.getByText("Needs review")).toBeVisible();
-	await expect(page.getByRole("button", { name: "Save Draft" })).toBeDisabled();
+	await expect(page.getByRole("button", { name: "Save Draft" })).toBeEnabled();
+});
+
+test("review confirmations can be saved from awaiting input instead of re-analyzing", async ({ page }) => {
+	let run = deploymentRun("awaiting_input");
+	run.plan.application_environment_reviews = [];
+	run.plan.resources = [{ logical_name: "kafka", type: "kafka", managed: true, required: true, acknowledgements: [], confidence: "high", reason: "Kafka", evidence: [] }];
+	let saved = false;
+	await mockDeployAPI(page, () => run, () => run, "owner", undefined, {
+		repository: () => sourceRepository("active"),
+		onPlanUpdate: (body) => {
+			saved = true;
+			run = { ...run, revision: run.revision + 1, state: "awaiting_approval", plan: body.plan as DeploymentRun["plan"] };
+			return run;
+		},
+	});
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await expect(page.getByRole("button", { name: "Analyze again" })).toHaveCount(0);
+	const runtime = page.locator("#application-runtime-1");
+	await runtime.getByLabel("This application does not require environment variables or secrets.").check();
+	await page.getByLabel("I acknowledge this is an experimental single-node Kafka without HA or backup").check();
+	await expect(page.getByRole("button", { name: "Save Draft" })).toBeEnabled();
+	await expect(page.getByRole("button", { name: "Save review changes" })).toBeEnabled();
+	await page.getByRole("button", { name: "Save review changes" }).click();
+	await expect.poll(() => saved).toBe(true);
+	await expect(page.getByRole("button", { name: "Approve & Deploy" })).toBeEnabled();
 });
 
 test("plain environment blocks secret-like names and directs to Add secret", async ({ page }) => {
@@ -706,6 +792,8 @@ type SourceBehavior = {
 	result?: () => Record<string, unknown>;
 	quota?: () => Record<string, unknown>;
 	onHostnameAction?: () => void;
+	hostKeyProbe?: (data: { public_host: string; ssh_port: number }) => Record<string, unknown>;
+	onResume?: () => void;
 };
 type AuthSelectionBehavior = { authenticated: boolean; selections: number };
 
@@ -762,6 +850,40 @@ async function mockDeployAPI(page: Page, current: () => ReturnType<typeof deploy
 		else if (path.endsWith("/deployments")) body = { deployments: [] };
 		else if (/\/bootstrap-sessions\/boot-1\/events$/.test(path) && source?.bootstrapEvents) body = source.bootstrapEvents();
 		else if (path.endsWith("/bootstrap-sessions")) body = { sessions: source?.bootstrapSession ? [source.bootstrapSession()] : [] };
+		else if (path.endsWith("/ssh-host-key-probes") && request.method() === "POST") {
+			const postData = request.postDataJSON() as { public_host: string; ssh_port: number };
+			body = source?.hostKeyProbe?.(postData) ?? {
+				id: "probe-1",
+				probe_id: "probe-1",
+				project_id: "proj-1",
+				public_host: postData.public_host || "103.252.137.163",
+				ssh_port: postData.ssh_port || 22,
+				resolved_ip: postData.public_host || "103.252.137.163",
+				algorithm: "ssh-ed25519",
+				fingerprint: "SHA256:4t7EExampleMockFingerprintAAAA",
+				trust_state: "first_seen",
+				status: "pending",
+				expires_at: "2026-09-05T12:00:00Z",
+				created_at: "2026-09-05T11:50:00Z",
+			};
+		}
+		else if (/\/ssh-host-key-probes\/[^/]+\/confirm$/.test(path) && request.method() === "POST") {
+			body = {
+				id: "trust-1",
+				trust_id: "trust-1",
+				project_id: "proj-1",
+				host: "103.252.137.163",
+				port: 22,
+				algorithm: "ssh-ed25519",
+				fingerprint: "SHA256:4t7EExampleMockFingerprintAAAA",
+				status: "active",
+				created_at: "2026-09-05T11:50:00Z",
+			};
+		}
+		else if (/\/bootstrap-sessions\/[^/]+\/resume$/.test(path) && request.method() === "POST") {
+			source?.onResume?.();
+			body = { id: "boot-1", status: "pending", public_host: "103.252.137.163", role: "first_server", auth_method: "password" };
+		}
 		else if (path.endsWith("/build-records")) body = { records: [] };
 		else if (path.endsWith("/audit")) body = { events: [] };
 		else if (path.endsWith("/incidents")) body = { source: "agent", payload_policy: "redacted", incidents: [] };

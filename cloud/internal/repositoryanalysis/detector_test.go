@@ -123,8 +123,10 @@ func TestComposeIdentityServiceInference(t *testing.T) {
 		foundJWT = foundJWT || secret.Name == "jwt-signing-key" && secret.ApplicationKey == "identity-api" && secret.EnvironmentName == "Jwt__SigningKey" && secret.Display == "Generated and securely stored" && secret.SecretRef == "generated://jwt-signing-key"
 	}
 	kafkaDisabled := false
-	for _, issue := range result.Issues {
-		kafkaDisabled = kafkaDisabled || issue.Code == "KAFKA_UNSUPPORTED" && !issue.Blocking && issue.Resolution == "Kafka__Enabled=false"
+	for _, resource := range result.Resources {
+		if resource.Type == "kafka" && !resource.Managed && !resource.Required && resource.Recommendation == "Detected but disabled by Kafka__Enabled=false" {
+			kafkaDisabled = true
+		}
 	}
 	if !foundPostgres || !foundValkeyResource || !foundDB || !foundValkey || !foundAPI || !foundHub || !foundJWT || !kafkaDisabled {
 		t.Fatalf("dependencies=%+v secrets=%+v", result.Dependencies, result.Secrets)
@@ -215,7 +217,7 @@ func TestAcceptanceProfileExcludesLowSignalSourceAndReadsRootDocs(t *testing.T) 
 	if proxyDependencies != 1 {
 		t.Fatalf("proxy dependencies=%d all=%+v", proxyDependencies, result.Dependencies)
 	}
-	kafkaResources, kafkaIssues := 0, 0
+	kafkaResources := 0
 	for _, resource := range result.Resources {
 		if resource.Type == "kafka" {
 			kafkaResources++
@@ -226,16 +228,13 @@ func TestAcceptanceProfileExcludesLowSignalSourceAndReadsRootDocs(t *testing.T) 
 	}
 	for _, issue := range result.Issues {
 		if issue.Code == "KAFKA_UNSUPPORTED" {
-			kafkaIssues++
-			if issue.Blocking || issue.Resolution != "Kafka__Enabled=false" {
-				t.Fatalf("kafka issue=%+v", issue)
-			}
+			t.Fatalf("unexpected KAFKA_UNSUPPORTED issue=%+v", issue)
 		}
 		if issue.Code == "ANALYSIS_TRUNCATED" {
 			t.Fatalf("unexpected truncation issue=%+v", issue)
 		}
 	}
-	if kafkaResources != 1 || kafkaIssues != 1 {
+	if kafkaResources != 1 {
 		t.Fatalf("resources=%+v issues=%+v", result.Resources, result.Issues)
 	}
 }
@@ -364,7 +363,7 @@ func TestKafkaInitMergesIntoDisabledKafkaEvidence(t *testing.T) {
 `,
 		"api/Dockerfile": "FROM scratch\nEXPOSE 8080\n",
 	})
-	kafkaResources, kafkaIssues := 0, 0
+	kafkaResources := 0
 	for _, resource := range result.Resources {
 		if resource.Type == "kafka" {
 			kafkaResources++
@@ -375,13 +374,10 @@ func TestKafkaInitMergesIntoDisabledKafkaEvidence(t *testing.T) {
 	}
 	for _, issue := range result.Issues {
 		if issue.Code == "KAFKA_UNSUPPORTED" {
-			kafkaIssues++
-			if issue.Blocking || issue.Resolution != "Kafka__Enabled=false" {
-				t.Fatalf("kafka issue=%+v", issue)
-			}
+			t.Fatalf("unexpected KAFKA_UNSUPPORTED issue: %+v", issue)
 		}
 	}
-	if kafkaResources != 1 || kafkaIssues != 1 {
+	if kafkaResources != 1 {
 		t.Fatalf("resources=%+v issues=%+v", result.Resources, result.Issues)
 	}
 	for _, dependency := range result.Dependencies {
@@ -522,4 +518,225 @@ func TestOversizedExplicitConfigBlocksWithoutFallingBack(t *testing.T) {
 	if !issueCodes["EXPLICIT_CONFIG_UNREADABLE"] || !issueCodes["ANALYSIS_TRUNCATED"] {
 		t.Fatalf("issues=%+v", result.Issues)
 	}
+}
+
+func TestKafkaEnabledDetectedAsManagedAndRequiredWithAllowlistSettings(t *testing.T) {
+	result := analyze(t, memoryRepository{
+		"compose.yaml": `services:
+  api:
+    build: {context: api, dockerfile: Dockerfile}
+    depends_on: [kafka]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      KAFKA_SECURITY_PROTOCOL: "SASL_PLAINTEXT"
+      KAFKA_SASL_MECHANISM: "PLAIN"
+      KAFKA_SASL_USERNAME: "opsi"
+      KAFKA_SASL_PASSWORD: "secret-password"
+  kafka:
+    image: apache/kafka:4.3.1
+    environment:
+      KAFKA_NUM_PARTITIONS: "5"
+      KAFKA_LOG_RETENTION_HOURS: "336"
+      KAFKA_ARBITRARY_SECRET: "must-not-copy"
+`,
+		"api/Dockerfile": "FROM scratch\nEXPOSE 8080\n",
+	})
+
+	var kafkaRes *Resource
+	for i := range result.Resources {
+		if result.Resources[i].Type == "kafka" {
+			kafkaRes = &result.Resources[i]
+			break
+		}
+	}
+	if kafkaRes == nil {
+		t.Fatal("kafka resource was not detected")
+	}
+	if !kafkaRes.Managed || !kafkaRes.Required {
+		t.Fatalf("kafka expected managed & required: %+v", kafkaRes)
+	}
+	if kafkaRes.Persistence == nil || !kafkaRes.Persistence.Persistent || kafkaRes.Persistence.SizeBytes != resourcev1.DefaultKafkaStorageBytes || kafkaRes.Persistence.PolicyRef != resourcev1.StoragePolicyDefault {
+		t.Fatalf("kafka persistence mismatch: %+v", kafkaRes.Persistence)
+	}
+	if kafkaRes.Settings["num_partitions"] != "5" || kafkaRes.Settings["retention_hours"] != "336" {
+		t.Fatalf("kafka settings allowlist mismatch: %+v", kafkaRes.Settings)
+	}
+	if _, exists := kafkaRes.Settings["KAFKA_ARBITRARY_SECRET"]; exists {
+		t.Fatal("arbitrary config copied from compose")
+	}
+	for _, issue := range result.Issues {
+		if issue.Code == "KAFKA_UNSUPPORTED" {
+			t.Fatalf("unexpected KAFKA_UNSUPPORTED issue: %+v", issue)
+		}
+	}
+
+	// Dependency checks
+	if len(result.Dependencies) != 1 {
+		t.Fatalf("dependencies count=%d", len(result.Dependencies))
+	}
+	dep := result.Dependencies[0]
+	if dep.Protocol != "kafka" || dep.To != "kafka" || !dep.Required {
+		t.Fatalf("kafka dependency expected required: %+v", dep)
+	}
+	if len(dep.Injections) != 5 {
+		t.Fatalf("expected 5 Kafka injections, got: %+v", dep.Injections)
+	}
+}
+
+func TestKafkaDotNetAndSpringDialectDetection(t *testing.T) {
+	result := analyze(t, memoryRepository{
+		"compose.yaml": `services:
+  dotnet-app:
+    build: {context: dotnet, dockerfile: Dockerfile}
+    depends_on: [kafka]
+    environment:
+      Kafka__BootstrapServers: "kafka:9092"
+      Kafka__SecurityProtocol: "SASL_PLAINTEXT"
+      Kafka__SaslMechanism: "PLAIN"
+      Kafka__SaslUsername: "opsi"
+      Kafka__SaslPassword: "pass"
+  spring-app:
+    build: {context: spring, dockerfile: Dockerfile}
+    depends_on: [kafka]
+    environment:
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      SPRING_KAFKA_SECURITY_PROTOCOL: "SASL_PLAINTEXT"
+      SPRING_KAFKA_PROPERTIES_SASL_MECHANISM: "PLAIN"
+  kafka:
+    image: apache/kafka:4.3.1
+`,
+		"dotnet/Dockerfile": "FROM scratch\nEXPOSE 5000\n",
+		"spring/Dockerfile": "FROM scratch\nEXPOSE 8080\n",
+	})
+
+	for _, dep := range result.Dependencies {
+		if dep.From == "dotnet-app" {
+			if len(dep.Injections) != 5 {
+				t.Fatalf("dotnet injections count=%d: %+v", len(dep.Injections), dep.Injections)
+			}
+		}
+		if dep.From == "spring-app" {
+			if len(dep.Injections) != 3 {
+				t.Fatalf("spring injections count=%d: %+v", len(dep.Injections), dep.Injections)
+			}
+		}
+	}
+}
+
+func TestKafkaTopicInitializersMergeApplicationDependencyMappings(t *testing.T) {
+	result := analyze(t, memoryRepository{
+		"compose.yaml": `services:
+  kafka:
+    image: apache/kafka:4.3.1
+  kafka-init-reminder:
+    image: apache/kafka:4.3.1
+    depends_on: [kafka]
+    entrypoint: ["/opt/kafka/bin/kafka-topics.sh"]
+    command: ["--bootstrap-server", "kafka:9092", "--create", "--topic", "calendar.reminder-due.v2", "--partitions", "3", "--replication-factor", "1"]
+  kafka-init-notifications:
+    image: apache/kafka:4.3.1
+    depends_on: [kafka]
+    entrypoint: ["/opt/kafka/bin/kafka-topics.sh"]
+    command: ["--bootstrap-server", "kafka:9092", "--create", "--topic", "calendar.notification-batch.v1", "--partitions", "6", "--replication-factor", "1"]
+  api:
+    build: {context: api, dockerfile: Dockerfile}
+    depends_on: [kafka-init-reminder, kafka-init-notifications]
+    environment:
+      Kafka__Enabled: true
+      Kafka__BootstrapServers: kafka:9092
+      Kafka__SecurityProtocol: PLAINTEXT
+`,
+		"api/Dockerfile": "FROM scratch\nEXPOSE 8080\n",
+	})
+
+	var kafkaDependencies []Dependency
+	for _, dependency := range result.Dependencies {
+		if dependency.To == "kafka" && dependency.Protocol == "kafka" {
+			kafkaDependencies = append(kafkaDependencies, dependency)
+		}
+	}
+	if len(kafkaDependencies) != 1 {
+		t.Fatalf("expected one canonical application → kafka dependency, got: %+v (all dependencies: %+v)", kafkaDependencies, result.Dependencies)
+	}
+	seen := map[string]bool{}
+	for _, injection := range kafkaDependencies[0].Injections {
+		if seen[injection.EnvironmentName] {
+			t.Fatalf("duplicate generated Kafka environment mapping: %+v", kafkaDependencies[0].Injections)
+		}
+		seen[injection.EnvironmentName] = true
+	}
+	for _, name := range []string{"Kafka__BootstrapServers", "Kafka__SecurityProtocol"} {
+		if !seen[name] {
+			t.Fatalf("missing Kafka mapping %s in %+v", name, kafkaDependencies[0].Injections)
+		}
+	}
+	foundAPI := false
+	for _, application := range result.Applications {
+		if application.SourceKey != "api" {
+			continue
+		}
+		foundAPI = true
+		if _, exists := application.Environment["Kafka__BootstrapServers"]; exists {
+			t.Fatalf("managed Kafka bootstrap key must not also be a plain environment value: %+v", application.Environment)
+		}
+		if _, exists := application.Environment["Kafka__SecurityProtocol"]; exists {
+			t.Fatalf("managed Kafka connection keys must not also be plain environment values: %+v", application.Environment)
+		}
+		if application.Environment["Kafka__Enabled"] != "true" {
+			t.Fatalf("application-owned Kafka setting was unexpectedly removed: %+v", application.Environment)
+		}
+	}
+	if !foundAPI {
+		t.Fatal("API application was not detected")
+	}
+}
+
+func TestKafkaTopicInitIsImportedWithoutExecutingCompose(t *testing.T) {
+	result := analyze(t, memoryRepository{
+		"compose.yaml": `services:
+  api:
+    build: {context: api, dockerfile: Dockerfile}
+    depends_on: [kafka]
+  kafka:
+    image: apache/kafka:4.3.1
+  kafka-init-reminder:
+    image: apache/kafka:4.3.1
+    entrypoint: ["/opt/kafka/bin/kafka-topics.sh"]
+    command: ["--bootstrap-server", "kafka:9092", "--create", "--if-not-exists", "--topic", "calendar.reminder-due.v2", "--partitions", "3", "--replication-factor", "1"]
+  kafka-init-notifications:
+    image: apache/kafka:4.3.1
+    entrypoint: ["/opt/kafka/bin/kafka-topics.sh"]
+    command: ["--bootstrap-server", "kafka:9092", "--create", "--if-not-exists", "--topic", "calendar.notification-batch.v1", "--partitions", "6", "--replication-factor", "1"]
+`,
+		"api/Dockerfile": "FROM scratch\nEXPOSE 8080\n",
+	})
+	for _, resource := range result.Resources {
+		if resource.Type != "kafka" {
+			continue
+		}
+		if len(resource.Topics) != 2 || resource.Topics[0].Name != "calendar.notification-batch.v1" || resource.Topics[0].Partitions != 6 || resource.Topics[1].Name != "calendar.reminder-due.v2" || resource.Topics[1].Partitions != 3 {
+			t.Fatalf("Kafka topics=%+v", resource.Topics)
+		}
+		return
+	}
+	t.Fatal("Kafka resource was not detected")
+}
+
+func TestKafkaTopicInitRejectsShellCommands(t *testing.T) {
+	result := analyze(t, memoryRepository{
+		"compose.yaml": `services:
+  kafka:
+    image: apache/kafka:4.3.1
+  kafka-init:
+    image: apache/kafka:4.3.1
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["kafka-topics.sh --create"]
+`,
+	})
+	for _, issue := range result.Issues {
+		if issue.Code == "KAFKA_TOPIC_INIT_UNSUPPORTED" && !issue.Blocking {
+			return
+		}
+	}
+	t.Fatalf("missing safe-parser warning: %+v", result.Issues)
 }

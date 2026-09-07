@@ -69,7 +69,7 @@ func TestAppWithoutKeyCreatesBlockingIssueAndNoneRequiredTransitionsToAwaitingAp
 		}},
 	}
 	authority := AuthorityRevisions{SourceCommitSHA: analysis.CommitSHA}
-	run, err = service.SetAnalysis(context.Background(), run.ProjectID, run.ID, analysis, authority, run.Plan.Target)
+	run, err = service.SetAnalysis(context.Background(), run.ProjectID, run.ID, analysis, authority, run.Plan.Target, false)
 	if err != nil {
 		t.Fatal(err)
 	}

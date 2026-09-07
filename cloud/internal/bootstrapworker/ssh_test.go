@@ -8,17 +8,16 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"net"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 func TestSSHAuthMethodsSupportsPasswordAndPrivateKey(t *testing.T) {
@@ -47,20 +46,41 @@ func TestSSHAuthMethodsSupportsPasswordAndPrivateKey(t *testing.T) {
 	}
 }
 
-func TestSSHConnectRequiresKnownHostsBeforeDial(t *testing.T) {
-	_, err := (SSHExecutor{}).Connect(context.Background(), RemoteTarget{Host: "127.0.0.1", Port: 1, Username: "root", Password: "secret"})
+func TestSSHConnectRequiresPinnedHostKey(t *testing.T) {
+	_, err := (SSHExecutor{}).Connect(context.Background(), RemoteTarget{
+		Host:     "127.0.0.1",
+		Port:     1,
+		Username: "root",
+		Password: "secret",
+		HostKey:  HostKeyConfig{},
+	})
 	if !errors.Is(err, ErrSSHHostKeyVerificationRequired) {
-		t.Fatalf("error=%v", err)
+		t.Fatalf("expected ErrSSHHostKeyVerificationRequired, got %v", err)
 	}
 }
 
 func TestSSHConnectMatchingHostKeySucceeds(t *testing.T) {
 	signer := newSSHSigner(t)
 	host, port := startSSHServer(t, signer)
-	knownHosts := writeKnownHosts(t, net.JoinHostPort(host, strconv.Itoa(port)), signer.PublicKey(), 0o600)
-	session, err := (SSHExecutor{KnownHostsPath: knownHosts}).Connect(context.Background(), RemoteTarget{Host: host, Port: port, Username: "root", Password: "secret"})
+
+	pubKeyBase64 := base64.StdEncoding.EncodeToString(signer.PublicKey().Marshal())
+	fp := ssh.FingerprintSHA256(signer.PublicKey())
+
+	target := RemoteTarget{
+		Host:     host,
+		Port:     port,
+		Username: "root",
+		Password: "secret",
+		HostKey: HostKeyConfig{
+			Algorithm:   signer.PublicKey().Type(),
+			PublicKey:   pubKeyBase64,
+			Fingerprint: fp,
+		},
+	}
+
+	session, err := (SSHExecutor{}).Connect(context.Background(), target)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Connect failed: %v", err)
 	}
 	if err := session.Close(); err != nil {
 		t.Fatal(err)
@@ -71,10 +91,25 @@ func TestSSHConnectUsesPinnedAlgorithmWhenServerOffersMultipleKeys(t *testing.T)
 	ed25519Signer := newSSHSigner(t)
 	ecdsaSigner := newECDSASigner(t)
 	host, port := startSSHServerWithSigners(t, ecdsaSigner, ed25519Signer)
-	knownHosts := writeKnownHosts(t, net.JoinHostPort(host, strconv.Itoa(port)), ed25519Signer.PublicKey(), 0o600)
-	session, err := (SSHExecutor{KnownHostsPath: knownHosts}).Connect(context.Background(), RemoteTarget{Host: host, Port: port, Username: "root", Password: "secret"})
+
+	pubKeyBase64 := base64.StdEncoding.EncodeToString(ed25519Signer.PublicKey().Marshal())
+	fp := ssh.FingerprintSHA256(ed25519Signer.PublicKey())
+
+	target := RemoteTarget{
+		Host:     host,
+		Port:     port,
+		Username: "root",
+		Password: "secret",
+		HostKey: HostKeyConfig{
+			Algorithm:   ssh.KeyAlgoED25519,
+			PublicKey:   pubKeyBase64,
+			Fingerprint: fp,
+		},
+	}
+
+	session, err := (SSHExecutor{}).Connect(context.Background(), target)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Connect with pinned algorithm failed: %v", err)
 	}
 	_ = session.Close()
 }
@@ -86,83 +121,119 @@ func TestSSHConnectPinnedRSAHostKeyAllowsRSASHA2(t *testing.T) {
 		t.Fatal(err)
 	}
 	host, port := startSSHServer(t, modernRSASigner)
-	knownHosts := writeKnownHosts(t, net.JoinHostPort(host, strconv.Itoa(port)), rsaSigner.PublicKey(), 0o600)
-	session, err := (SSHExecutor{KnownHostsPath: knownHosts}).Connect(context.Background(), RemoteTarget{Host: host, Port: port, Username: "root", Password: "secret"})
+
+	pubKeyBase64 := base64.StdEncoding.EncodeToString(rsaSigner.PublicKey().Marshal())
+	fp := ssh.FingerprintSHA256(rsaSigner.PublicKey())
+
+	target := RemoteTarget{
+		Host:     host,
+		Port:     port,
+		Username: "root",
+		Password: "secret",
+		HostKey: HostKeyConfig{
+			Algorithm:   ssh.KeyAlgoRSA,
+			PublicKey:   pubKeyBase64,
+			Fingerprint: fp,
+		},
+	}
+
+	session, err := (SSHExecutor{}).Connect(context.Background(), target)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Connect with pinned RSA key failed: %v", err)
 	}
 	if err := session.Close(); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestSSHConnectUnknownHostFailsClosed(t *testing.T) {
-	signer := newSSHSigner(t)
-	host, port := startSSHServer(t, signer)
-	knownHosts := writeKnownHosts(t, "other.example:22", signer.PublicKey(), 0o600)
-	_, err := (SSHExecutor{KnownHostsPath: knownHosts}).Connect(context.Background(), RemoteTarget{Host: host, Port: port, Username: "root", Password: "secret"})
-	if !errors.Is(err, ErrSSHHostKeyVerificationFailed) {
-		t.Fatalf("error=%v", err)
-	}
-}
-
-func TestSSHConnectKeyMismatchFailsClosed(t *testing.T) {
+func TestSSHConnectKeyMismatchReturnsStructuredObservation(t *testing.T) {
 	serverSigner := newSSHSigner(t)
 	host, port := startSSHServer(t, serverSigner)
-	knownHosts := writeKnownHosts(t, net.JoinHostPort(host, strconv.Itoa(port)), newSSHSigner(t).PublicKey(), 0o600)
-	_, err := (SSHExecutor{KnownHostsPath: knownHosts}).Connect(context.Background(), RemoteTarget{Host: host, Port: port, Username: "root", Password: "secret"})
-	if !errors.Is(err, ErrSSHHostKeyVerificationFailed) {
-		t.Fatalf("error=%v", err)
+
+	otherSigner := newSSHSigner(t)
+	otherPubKeyBase64 := base64.StdEncoding.EncodeToString(otherSigner.PublicKey().Marshal())
+	otherFP := ssh.FingerprintSHA256(otherSigner.PublicKey())
+
+	target := RemoteTarget{
+		Host:     host,
+		Port:     port,
+		Username: "root",
+		Password: "secret",
+		HostKey: HostKeyConfig{
+			Algorithm:   ssh.KeyAlgoED25519,
+			PublicKey:   otherPubKeyBase64,
+			Fingerprint: otherFP,
+		},
+	}
+
+	_, err := (SSHExecutor{}).Connect(context.Background(), target)
+	if err == nil {
+		t.Fatal("expected error on host key mismatch, got nil")
+	}
+
+	var mismatch ErrHostKeyMismatch
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("expected ErrHostKeyMismatch, got %T (%v)", err, err)
+	}
+
+	expectedObservedFP := ssh.FingerprintSHA256(serverSigner.PublicKey())
+	if mismatch.Fingerprint != expectedObservedFP {
+		t.Fatalf("expected observed fingerprint %s, got %s", expectedObservedFP, mismatch.Fingerprint)
+	}
+	if mismatch.Algorithm != ssh.KeyAlgoED25519 {
+		t.Fatalf("expected observed algorithm %s, got %s", ssh.KeyAlgoED25519, mismatch.Algorithm)
 	}
 }
 
-func TestSSHConnectNonstandardPortKnownHostsFormat(t *testing.T) {
+func TestSSHConnectDialUsesResolvedIP(t *testing.T) {
 	signer := newSSHSigner(t)
 	host, port := startSSHServer(t, signer)
-	if port == 22 {
-		t.Fatal("test server unexpectedly used port 22")
+
+	pubKeyBase64 := base64.StdEncoding.EncodeToString(signer.PublicKey().Marshal())
+	fp := ssh.FingerprintSHA256(signer.PublicKey())
+
+	target := RemoteTarget{
+		Host:       "logical-node-name.example",
+		ResolvedIP: host, // 127.0.0.1
+		Port:       port,
+		Username:   "root",
+		Password:   "secret",
+		HostKey: HostKeyConfig{
+			Algorithm:   signer.PublicKey().Type(),
+			PublicKey:   pubKeyBase64,
+			Fingerprint: fp,
+		},
 	}
-	entry := knownhosts.Normalize(net.JoinHostPort(host, strconv.Itoa(port)))
-	knownHosts := writeKnownHosts(t, entry, signer.PublicKey(), 0o640)
-	session, err := (SSHExecutor{KnownHostsPath: knownHosts}).Connect(context.Background(), RemoteTarget{Host: host, Port: port, Username: "root", Password: "secret"})
+
+	session, err := (SSHExecutor{}).Connect(context.Background(), target)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Connect with ResolvedIP failed: %v", err)
 	}
 	_ = session.Close()
-}
-
-func TestSSHKnownHostsRejectsWritableFileAndSymlink(t *testing.T) {
-	for name, makePath := range map[string]func(*testing.T) string{
-		"group writable": func(t *testing.T) string {
-			return writeKnownHosts(t, "example.test", newSSHSigner(t).PublicKey(), 0o620)
-		},
-		"world writable": func(t *testing.T) string {
-			return writeKnownHosts(t, "example.test", newSSHSigner(t).PublicKey(), 0o606)
-		},
-		"symlink": func(t *testing.T) string {
-			target := writeKnownHosts(t, "example.test", newSSHSigner(t).PublicKey(), 0o600)
-			link := filepath.Join(t.TempDir(), "known_hosts")
-			if err := os.Symlink(target, link); err != nil {
-				t.Fatal(err)
-			}
-			return link
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			_, err := (SSHExecutor{KnownHostsPath: makePath(t)}).Connect(context.Background(), RemoteTarget{Host: "127.0.0.1", Port: 1, Username: "root", Password: "secret"})
-			if !errors.Is(err, ErrSSHHostKeyVerificationFailed) {
-				t.Fatalf("error=%v", err)
-			}
-		})
-	}
 }
 
 func TestSSHVerificationErrorsDoNotExposeCredentials(t *testing.T) {
 	privateKey := "private-key-must-not-appear"
 	password := "password-must-not-appear"
-	_, err := (SSHExecutor{}).Connect(context.Background(), RemoteTarget{Host: "127.0.0.1", Port: 1, Username: "root", Password: password, PrivateKey: privateKey})
-	if err == nil || strings.Contains(err.Error(), password) || strings.Contains(err.Error(), privateKey) {
-		t.Fatalf("credential leaked in error: %v", err)
+	_, err := (SSHExecutor{}).Connect(context.Background(), RemoteTarget{
+		Host:       "127.0.0.1",
+		Port:       1,
+		Username:   "root",
+		Password:   password,
+		PrivateKey: privateKey,
+		HostKey: HostKeyConfig{
+			Algorithm:   "ssh-ed25519",
+			PublicKey:   "AAAA",
+			Fingerprint: "SHA256:dummy",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	for _, secret := range []string{privateKey, password} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("secret leaked in error: %v", err)
+		}
 	}
 }
 
@@ -233,19 +304,23 @@ func startSSHServerWithSigners(t *testing.T, signers ...ssh.Signer) (string, int
 		serverConfig.AddHostKey(signer)
 	}
 	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		serverConn, channels, requests, err := ssh.NewServerConn(conn, serverConfig)
-		if err != nil {
-			return
-		}
-		defer serverConn.Close()
-		go ssh.DiscardRequests(requests)
-		for channel := range channels {
-			_ = channel.Reject(ssh.UnknownChannelType, "test server does not accept channels")
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				serverConn, channels, requests, err := ssh.NewServerConn(c, serverConfig)
+				if err != nil {
+					return
+				}
+				defer serverConn.Close()
+				go ssh.DiscardRequests(requests)
+				for channel := range channels {
+					_ = channel.Reject(ssh.UnknownChannelType, "test server does not accept channels")
+				}
+			}(conn)
 		}
 	}()
 	host, rawPort, err := net.SplitHostPort(listener.Addr().String())
@@ -257,17 +332,4 @@ func startSSHServerWithSigners(t *testing.T, signers ...ssh.Signer) (string, int
 		t.Fatal(err)
 	}
 	return host, port
-}
-
-func writeKnownHosts(t *testing.T, host string, key ssh.PublicKey, mode os.FileMode) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "known_hosts")
-	line := knownhosts.Line([]string{knownhosts.Normalize(host)}, key) + "\n"
-	if err := os.WriteFile(path, []byte(line), mode); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(path, mode); err != nil {
-		t.Fatal(err)
-	}
-	return path
 }

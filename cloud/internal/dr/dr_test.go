@@ -212,7 +212,11 @@ func seedCloudDRState(t *testing.T, db *sql.DB) seededCloud {
 	if _, err := db.ExecContext(context.Background(), `INSERT INTO personal_access_tokens(id,user_id,token_hash,expires_at,revoked) VALUES('pat-dr-proof',$1,$2,$3,false)`, seed.userID, patHash, now.Add(24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	bootstrap, err := svc.CreateBootstrapSession(project.ID, "first_server", "198.51.100.10", "ubuntu", "ssh_password", seed.userID, "bootstrap-key", 22)
+	obs, err := svc.CreateSSHHostKeyObservation(project.ID, "198.51.100.10", 22, "198.51.100.10", "ssh-ed25519", "AAAAC3NzaC1lZDI1NTE5AAAAIDR", "SHA256:DRTESTFINGERPRINT", seed.userID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrap, err := svc.CreateBootstrapSession(project.ID, "first_server", "198.51.100.10", "ubuntu", "ssh_password", seed.userID, "bootstrap-key", 22, obs.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

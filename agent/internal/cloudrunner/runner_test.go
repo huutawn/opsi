@@ -574,18 +574,63 @@ func TestConnectionStateFailsClosedAfterCloudError(t *testing.T) {
 	}
 }
 
+type deadlineCapturingClient struct {
+	fakeClient
+	heartbeatDeadline time.Time
+	pollDeadline      time.Time
+}
+
+func (c *deadlineCapturingClient) Heartbeat(ctx context.Context, _ string, _ cloudrelay.Heartbeat) error {
+	var ok bool
+	c.heartbeatDeadline, ok = ctx.Deadline()
+	if !ok {
+		return errors.New("heartbeat context has no deadline")
+	}
+	return nil
+}
+
+func (c *deadlineCapturingClient) PollJob(ctx context.Context, _ string, _ time.Duration) (*cloudrelay.JobLease, error) {
+	var ok bool
+	c.pollDeadline, ok = ctx.Deadline()
+	if !ok {
+		return nil, errors.New("poll context has no deadline")
+	}
+	c.cancel()
+	return nil, context.Canceled
+}
+
+func TestRunnerBoundsHeartbeatAndLongPollRequests(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &deadlineCapturingClient{fakeClient: fakeClient{cancel: cancel}}
+	runner := Runner{Client: client, Engine: &fakeRolloutEngine{}, NodeID: "node-1", PollInterval: time.Millisecond, LongPollWait: 30 * time.Second, HeartbeatInterval: time.Hour}
+	started := time.Now()
+	if err := runner.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("run err=%v", err)
+	}
+	if heartbeatRemaining := client.heartbeatDeadline.Sub(started); heartbeatRemaining <= 0 || heartbeatRemaining > cloudHeartbeatTimeout+time.Second {
+		t.Fatalf("heartbeat deadline remaining=%s", heartbeatRemaining)
+	}
+	wantPollTimeout := runner.LongPollWait + cloudPollTimeoutMargin
+	if pollRemaining := client.pollDeadline.Sub(started); pollRemaining < runner.LongPollWait-time.Second || pollRemaining > wantPollTimeout+time.Second {
+		t.Fatalf("poll deadline remaining=%s", pollRemaining)
+	}
+}
+
 func TestHeartbeatHealthAndCapabilitiesFailClosed(t *testing.T) {
 	tests := []struct {
 		name          string
 		probe         HealthProbe
 		engine        DeployEngine
 		lifecycle     NodeLifecycleExecutor
+		managed       ManagedResourceReconciler
 		wantStatus    string
 		wantReady     bool
 		wantDeploy    bool
 		wantLifecycle bool
+		wantManaged   bool
 	}{
 		{name: "ready", probe: staticHealthProbe{NodeReady: true, K3SStatus: K3SStatusReady}, engine: &fakeRolloutEngine{}, wantStatus: K3SStatusReady, wantReady: true, wantDeploy: true},
+		{name: "managed Kafka ready", probe: staticHealthProbe{NodeReady: true, K3SStatus: K3SStatusReady}, engine: &fakeRolloutEngine{}, managed: fakeManagedResources{}, wantStatus: K3SStatusReady, wantReady: true, wantDeploy: true, wantManaged: true},
 		{name: "unavailable", probe: staticHealthProbe{K3SStatus: K3SStatusUnavailable}, engine: &fakeRolloutEngine{}, wantStatus: K3SStatusUnavailable},
 		{name: "not ready", probe: staticHealthProbe{K3SStatus: K3SStatusNotReady}, engine: &fakeRolloutEngine{}, wantStatus: K3SStatusNotReady},
 		{name: "missing probe", engine: &fakeRolloutEngine{}, wantStatus: K3SStatusUnavailable},
@@ -594,8 +639,8 @@ func TestHeartbeatHealthAndCapabilitiesFailClosed(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &fakeClient{}
-			Runner{Client: client, Engine: tt.engine, NodeLifecycle: tt.lifecycle, HealthProbe: tt.probe}.sendHeartbeat(context.Background())
-			if client.heartbeat.NodeReady != tt.wantReady || client.heartbeat.K3SStatus != tt.wantStatus || client.heartbeat.Capabilities["deploy"] != tt.wantDeploy || client.heartbeat.Capabilities["node_lifecycle"] != tt.wantLifecycle {
+			Runner{Client: client, Engine: tt.engine, NodeLifecycle: tt.lifecycle, ManagedResources: tt.managed, HealthProbe: tt.probe}.sendHeartbeat(context.Background())
+			if client.heartbeat.NodeReady != tt.wantReady || client.heartbeat.K3SStatus != tt.wantStatus || client.heartbeat.Capabilities["deploy"] != tt.wantDeploy || client.heartbeat.Capabilities["node_lifecycle"] != tt.wantLifecycle || client.heartbeat.Capabilities["managed_resources"] != tt.wantManaged || client.heartbeat.Capabilities["managed_kafka"] != tt.wantManaged {
 				t.Fatalf("heartbeat = %+v", client.heartbeat)
 			}
 		})

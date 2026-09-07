@@ -19,6 +19,8 @@ import (
 
 const managedResourceFieldManager = "opsi-p07b1-managed-resource"
 
+const defaultManagedResourceReadinessTimeout = time.Duration(resourcev1.ManagedResourceReadinessTimeoutSeconds) * time.Second
+
 type ManagedResourceReconciler struct {
 	Runner       deploy.CommandRunner
 	KubectlPath  string
@@ -69,8 +71,8 @@ func (r ManagedResourceReconciler) apply(ctx context.Context, spec resourcev1.Ma
 			return nil, errors.New("existing Kubernetes object has different Opsi managed-resource ownership")
 		}
 		if current != nil && manifestKind(object) == "PersistentVolumeClaim" {
-			if !postgresPVCMatchesIntent(current, spec) {
-				return nil, managedResourceError{resourcev1.FailureStorageResizeUnsupported, "managed PostgreSQL PVC intent does not match the existing retained volume"}
+			if !managedPVCMatchesIntent(current, spec) {
+				return nil, managedResourceError{resourcev1.FailureStorageResizeUnsupported, fmt.Sprintf("managed %s PVC intent does not match the existing retained volume", spec.ResourceType)}
 			}
 			continue
 		}
@@ -89,12 +91,16 @@ func (r ManagedResourceReconciler) apply(ctx context.Context, spec resourcev1.Ma
 				return nil, managedResourceError{resourcev1.FailureSecretApplyFailed, "managed resource secret apply failed"}
 			}
 			if manifestKind(manifest) == "PersistentVolumeClaim" {
-				return nil, managedResourceError{resourcev1.FailurePVCApplyFailed, "managed PostgreSQL PVC apply failed"}
+				return nil, managedResourceError{resourcev1.FailurePVCApplyFailed, fmt.Sprintf("managed %s PVC apply failed", spec.ResourceType)}
 			}
 			return nil, err
 		}
 	}
-	return r.waitReady(ctx, spec)
+	evidence, err := r.waitReady(ctx, spec)
+	if err != nil || spec.ResourceType != resourcev1.TypeKafka {
+		return evidence, err
+	}
+	return r.ensureKafkaTopics(ctx, spec, evidence)
 }
 
 func (r ManagedResourceReconciler) ensureNamespace(ctx context.Context, spec resourcev1.ManagedResourceSpec) error {
@@ -121,22 +127,27 @@ func (r ManagedResourceReconciler) ensureNamespace(ctx context.Context, spec res
 
 func (r ManagedResourceReconciler) delete(ctx context.Context, spec resourcev1.ManagedResourceSpec) (*resourcev1.ManagedResourceEvidence, error) {
 	var retainedPVC map[string]any
-	if spec.ResourceType == resourcev1.TypePostgres {
+	if managedStorageRequired(spec.ResourceType) {
 		pvc, err := r.get(ctx, "persistentvolumeclaim", managedResourcePVCName(spec), managedResourceNamespace(spec))
 		if err != nil {
 			return nil, err
 		}
 		if pvc == nil {
-			return nil, managedResourceError{resourcev1.FailurePersistentDeleteUnsupported, "managed PostgreSQL runtime delete cannot verify a retained PVC"}
+			return nil, managedResourceError{resourcev1.FailurePersistentDeleteUnsupported, fmt.Sprintf("managed %s runtime delete cannot verify a retained PVC", spec.ResourceType)}
 		}
-		if !exactManagedResourceOwnership(pvc, spec) || !postgresPVCMatchesIntent(pvc, spec) {
-			return nil, errors.New("refusing to retain a PostgreSQL PVC with different Opsi managed-resource ownership")
+		if !exactManagedResourceOwnership(pvc, spec) || !managedPVCMatchesIntent(pvc, spec) {
+			return nil, fmt.Errorf("refusing to retain a %s PVC with different Opsi managed-resource ownership", spec.ResourceType)
 		}
 		retainedPVC = pvc
 	}
 	workloadKind := "deployment"
-	if spec.ResourceType == resourcev1.TypePostgres {
+	if managedStorageRequired(spec.ResourceType) {
 		workloadKind = "statefulset"
+	}
+	if spec.ResourceType == resourcev1.TypeKafka {
+		if _, err := r.run(ctx, nil, "delete", "job", "-n", managedResourceNamespace(spec), "-l", selectorString(managedResourceOwnershipLabels(spec)), "--wait=true", "--timeout=2m", "--ignore-not-found"); err != nil {
+			return nil, err
+		}
 	}
 	for _, kind := range []string{workloadKind, "service", "secret"} {
 		if kind == "secret" && !managedCredentialRequired(spec.ResourceType) {
@@ -161,7 +172,7 @@ func (r ManagedResourceReconciler) delete(ctx context.Context, spec resourcev1.M
 		}
 	}
 	evidence := &resourcev1.ManagedResourceEvidence{ObservedSpecHash: spec.SpecHash, Deleted: true, ObservedAt: time.Now().UTC()}
-	if spec.ResourceType == resourcev1.TypePostgres {
+	if managedStorageRequired(spec.ResourceType) {
 		evidence.Namespace, evidence.PVCName, evidence.StorageRetained = managedResourceNamespace(spec), managedResourcePVCName(spec), true
 		evidence.PVCUID, _ = nested(retainedPVC, "metadata", "uid").(string)
 		evidence.PVName, _ = nested(retainedPVC, "spec", "volumeName").(string)
@@ -170,7 +181,7 @@ func (r ManagedResourceReconciler) delete(ctx context.Context, spec resourcev1.M
 		evidence.RequestedBytes, evidence.StorageHash = spec.Storage.SizeBytes, resourcev1.ManagedResourceStorageHash(spec)
 		pv, err := r.get(ctx, "persistentvolume", evidence.PVName, "")
 		if err != nil || pv == nil {
-			return nil, managedResourceError{resourcev1.FailureRetainedStorageIdentityMismatch, "managed PostgreSQL runtime delete cannot verify the bound PV"}
+			return nil, managedResourceError{resourcev1.FailureRetainedStorageIdentityMismatch, fmt.Sprintf("managed %s runtime delete cannot verify the bound PV", spec.ResourceType)}
 		}
 		evidence.PVUID, _ = nested(pv, "metadata", "uid").(string)
 		evidence.ReclaimPolicy, _ = nested(pv, "spec", "persistentVolumeReclaimPolicy").(string)
@@ -179,17 +190,14 @@ func (r ManagedResourceReconciler) delete(ctx context.Context, spec resourcev1.M
 		claimUID, _ := nested(pv, "spec", "claimRef", "uid").(string)
 		pvStorageClass, _ := nested(pv, "spec", "storageClassName").(string)
 		if evidence.PVCUID == "" || evidence.PVUID == "" || evidence.PVName == "" || evidence.ReclaimPolicy == "" || claimName != evidence.PVCName || claimNamespace != evidence.Namespace || claimUID != evidence.PVCUID || pvStorageClass != evidence.StorageClass {
-			return nil, managedResourceError{resourcev1.FailureRetainedStorageIdentityMismatch, "managed PostgreSQL retained PVC/PV identity does not match"}
+			return nil, managedResourceError{resourcev1.FailureRetainedStorageIdentityMismatch, fmt.Sprintf("managed %s retained PVC/PV identity does not match", spec.ResourceType)}
 		}
 	}
 	return evidence, nil
 }
 
 func (r ManagedResourceReconciler) waitReady(ctx context.Context, spec resourcev1.ManagedResourceSpec) (*resourcev1.ManagedResourceEvidence, error) {
-	timeout := r.Timeout
-	if timeout <= 0 {
-		timeout = 3 * time.Minute
-	}
+	timeout := r.readinessTimeout()
 	interval := r.PollInterval
 	if interval <= 0 {
 		interval = 2 * time.Second
@@ -206,7 +214,7 @@ func (r ManagedResourceReconciler) waitReady(ctx context.Context, spec resourcev
 				return evidence, err
 			}
 		}
-		if err == nil && evidence.WorkloadReady && evidence.PodReady && evidence.ServiceReady && (!managedCredentialRequired(spec.ResourceType) || evidence.SecretReady && evidence.AuthReady) && (spec.ResourceType != resourcev1.TypePostgres || evidence.StorageReady && evidence.VolumeMounted) && evidence.Image == spec.Image {
+		if err == nil && evidence.WorkloadReady && evidence.PodReady && evidence.ServiceReady && (!managedCredentialRequired(spec.ResourceType) || evidence.SecretReady && evidence.AuthReady) && (!managedStorageRequired(spec.ResourceType) || evidence.StorageReady && evidence.VolumeMounted) && evidence.Image == spec.Image {
 			return evidence, nil
 		}
 		if err == nil && evidence.Image != "" && evidence.Image != spec.Image {
@@ -219,14 +227,17 @@ func (r ManagedResourceReconciler) waitReady(ctx context.Context, spec resourcev
 			if evidence != nil && !evidence.AuthReady && managedCredentialRequired(spec.ResourceType) {
 				return evidence, managedResourceError{resourcev1.FailureAuthFailed, "managed resource authenticated readiness check failed"}
 			}
-			if spec.ResourceType == resourcev1.TypePostgres && evidence != nil {
+			if managedStorageRequired(spec.ResourceType) && evidence != nil {
 				switch {
 				case !evidence.StorageReady:
-					return evidence, managedResourceError{resourcev1.FailurePVCNotBound, "managed PostgreSQL PVC did not become Bound"}
+					return evidence, managedResourceError{resourcev1.FailurePVCNotBound, fmt.Sprintf("managed %s PVC did not become Bound", spec.ResourceType)}
 				case !evidence.VolumeMounted:
-					return evidence, managedResourceError{resourcev1.FailureVolumeMountFailed, "managed PostgreSQL PVC was not mounted at the data directory"}
+					return evidence, managedResourceError{resourcev1.FailureVolumeMountFailed, fmt.Sprintf("managed %s PVC was not mounted at the data directory", spec.ResourceType)}
 				case !evidence.WorkloadReady || !evidence.PodReady:
-					return evidence, managedResourceError{resourcev1.FailureDatabaseInitFailed, "managed PostgreSQL database did not initialize"}
+					if spec.ResourceType == resourcev1.TypePostgres {
+						return evidence, managedResourceError{resourcev1.FailureDatabaseInitFailed, "managed PostgreSQL database did not initialize"}
+					}
+					return evidence, managedResourceError{resourcev1.FailureReadinessFailed, fmt.Sprintf("managed %s broker did not initialize", spec.ResourceType)}
 				}
 			}
 			return evidence, managedResourceError{resourcev1.FailureReadinessFailed, "managed resource readiness timed out"}
@@ -235,9 +246,19 @@ func (r ManagedResourceReconciler) waitReady(ctx context.Context, spec resourcev
 	}
 }
 
+func (r ManagedResourceReconciler) readinessTimeout() time.Duration {
+	if r.Timeout > 0 {
+		return r.Timeout
+	}
+	return defaultManagedResourceReadinessTimeout
+}
+
 func (r ManagedResourceReconciler) observe(ctx context.Context, spec resourcev1.ManagedResourceSpec) (*resourcev1.ManagedResourceEvidence, error) {
 	if spec.ResourceType == resourcev1.TypePostgres {
 		return r.observePostgres(ctx, spec)
+	}
+	if spec.ResourceType == resourcev1.TypeKafka {
+		return r.observeKafka(ctx, spec)
 	}
 	namespace := managedResourceNamespace(spec)
 	deployment, err := r.get(ctx, "deployment", spec.Connection.ServiceName, namespace)
@@ -284,6 +305,9 @@ func (r ManagedResourceReconciler) observe(ctx context.Context, spec resourcev1.
 func managedResourceObjects(spec resourcev1.ManagedResourceSpec, credential *resourcev1.ManagedResourceCredential) []map[string]any {
 	if spec.ResourceType == resourcev1.TypePostgres {
 		return postgresManagedResourceObjects(spec, credential)
+	}
+	if spec.ResourceType == resourcev1.TypeKafka {
+		return kafkaManagedResourceObjects(spec, credential)
 	}
 	namespace := managedResourceNamespace(spec)
 	labels := managedResourceLabels(spec)
@@ -570,5 +594,20 @@ func invalidSpecFailureCode(spec resourcev1.ManagedResourceSpec) string {
 			return resourcev1.FailureVersionUpgradeUnsupported
 		}
 	}
+	if spec.ResourceType == resourcev1.TypeKafka {
+		switch {
+		case !spec.Storage.Persistent:
+			return resourcev1.FailureStorageRequired
+		case spec.Storage.SizeBytes < 1 || spec.Storage.PolicyRef != resourcev1.StoragePolicyDefault:
+			return resourcev1.FailureStorageInvalid
+		case spec.Version != resourcev1.KafkaVersion:
+			return resourcev1.FailureVersionUpgradeUnsupported
+		}
+	}
 	return resourcev1.FailureSpecInvalid
+}
+
+func managedStorageRequired(resourceType resourcev1.Type) bool {
+	definition, ok := resourcev1.Definition(resourceType)
+	return ok && definition.Storage.Required
 }

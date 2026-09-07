@@ -128,6 +128,102 @@ func sortResult(result *Result) {
 	})
 }
 
+// mergeManagedDependencies keeps one authoritative resource edge for each
+// application/resource/protocol tuple. Compose topic initializer services are
+// intentionally folded into the Kafka resource; their prerequisites must not
+// become duplicate application-to-Kafka injection mappings.
+func mergeManagedDependencies(result *Result) {
+	merged := make([]Dependency, 0, len(result.Dependencies))
+	indices := make(map[string]int, len(result.Dependencies))
+	conflicts := make(map[string]bool)
+	for _, candidate := range result.Dependencies {
+		if !managedDependencyProtocol(candidate.Protocol) {
+			merged = append(merged, candidate)
+			continue
+		}
+		key := candidate.From + "\x00" + candidate.To + "\x00" + candidate.Protocol
+		index, found := indices[key]
+		if !found {
+			injections := candidate.Injections
+			candidate.Injections = nil
+			mergeManagedDependencyInjections(&candidate, injections, key, conflicts)
+			indices[key] = len(merged)
+			merged = append(merged, candidate)
+			continue
+		}
+		current := &merged[index]
+		current.Required = current.Required || candidate.Required
+		if current.Verification == nil {
+			current.Verification = candidate.Verification
+		}
+		current.Evidence = append(current.Evidence, candidate.Evidence...)
+		mergeManagedDependencyInjections(current, candidate.Injections, key, conflicts)
+	}
+	result.Dependencies = merged
+	for conflict := range conflicts {
+		parts := strings.Split(conflict, "\x00")
+		result.Issues = append(result.Issues, Issue{
+			Code:       "CONNECTION_MAPPING_CONFLICT",
+			Message:    "Conflicting generated mappings were detected for " + parts[0] + " → " + parts[1] + " environment " + parts[3] + ".",
+			Resolution: "Select one protocol-specific source for the environment mapping in Review plan.",
+			Blocking:   true,
+		})
+	}
+}
+
+func mergeManagedDependencyInjections(current *Dependency, incoming []Injection, key string, conflicts map[string]bool) {
+	for _, injection := range incoming {
+		matched := false
+		for _, existing := range current.Injections {
+			if existing.EnvironmentName != injection.EnvironmentName {
+				continue
+			}
+			matched = true
+			if existing.SymbolicSource != injection.SymbolicSource || existing.Template != injection.Template {
+				conflicts[key+"\x00"+injection.EnvironmentName] = true
+			}
+			break
+		}
+		if !matched {
+			current.Injections = append(current.Injections, injection)
+		}
+	}
+}
+
+func managedDependencyProtocol(protocol string) bool {
+	switch protocol {
+	case "postgres", "redis", "nats", "kafka":
+		return true
+	default:
+		return false
+	}
+}
+
+// RemoveManagedDependencyEnvironmentKeys ensures a managed resource owns each
+// connection key exactly once. Application-owned settings such as
+// Kafka__Enabled are left untouched.
+func RemoveManagedDependencyEnvironmentKeys(applications []Application, dependencies []Dependency) {
+	for index := range applications {
+		injected := map[string]bool{}
+		for _, dependency := range dependencies {
+			if dependency.From != applications[index].Key || !managedDependencyProtocol(dependency.Protocol) {
+				continue
+			}
+			for _, injection := range dependency.Injections {
+				injected[injection.EnvironmentName] = true
+			}
+		}
+		for name := range applications[index].Environment {
+			if injected[name] {
+				delete(applications[index].Environment, name)
+			}
+		}
+		if len(applications[index].Environment) == 0 {
+			applications[index].Environment = nil
+		}
+	}
+}
+
 func (d Detector) clock() time.Time {
 	if d.Now != nil {
 		return d.Now().UTC()

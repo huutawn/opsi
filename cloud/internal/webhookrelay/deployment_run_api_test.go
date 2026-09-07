@@ -442,6 +442,51 @@ func TestProvisioningReusesCanonicalServiceConfigurationOnRetry(t *testing.T) {
 	}
 }
 
+func TestProvisioningCarriesAutomaticSameOriginRouteAliasesIntoConfiguration(t *testing.T) {
+	server := NewServer(Config{})
+	project, err := server.Registry.CreateProject("org-1", "Route aliases", "route-aliases", "owner", "route-aliases-project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := repositoryanalysis.Application{Key: "api", Name: "api", Port: 8080, Exposure: repositoryanalysis.Exposure{Mode: "public", Hostname: "apps.example.com", Path: "/api", AdditionalPaths: []string{"/hubs/notifications"}, Automatic: true}}
+	frontend := repositoryanalysis.Application{Key: "frontend", Name: "frontend", Port: 3000, Exposure: repositoryanalysis.Exposure{Mode: "public", Hostname: "apps.example.com", Path: "/", Automatic: true}}
+	run := deploymentworkflow.Run{
+		ID: "run-route-aliases", ProjectID: project.ID, CreatedBy: "owner",
+		Plan: deploymentworkflow.Plan{
+			Applications: []repositoryanalysis.Application{api, frontend},
+			Dependencies: []repositoryanalysis.Dependency{{From: frontend.Key, To: api.Key, Protocol: "http", Strategy: serviceconfigurationv1.StrategySameOrigin, Path: "/hubs/notifications", Required: true}},
+			Bindings:     []repositoryanalysis.Binding{{From: frontend.Key, To: api.Key, Kind: serviceconfigurationv1.BindingBrowserHTTP, Path: "/hubs/notifications"}},
+			Target:       deploymentworkflow.Target{EnvironmentID: "env-1", RuntimeID: "runtime-1", Exposure: "public", Hostname: "apps.example.com"},
+		},
+	}
+	apiService, err := server.Registry.CreateService(project.ID, applicationServiceDraft(run, api), "route-alias-api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	frontendService, err := server.Registry.CreateService(project.ID, applicationServiceDraft(run, frontend), "route-alias-frontend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := deploymentWorkflowExecutor{server: server}
+	if _, _, err := executor.ensureConfigurations(t.Context(), run, map[string]registry.ServiceRecord{api.Key: apiService, frontend.Key: frontendService}, nil); err != nil {
+		t.Fatal(err)
+	}
+	apiConfig, err := server.Registry.GetServiceConfiguration(project.ID, apiService.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if apiConfig.PublicRoute == nil || !apiConfig.PublicRoute.HasPath("/hubs/notifications") {
+		t.Fatalf("API aliases missing from canonical configuration: %+v", apiConfig.PublicRoute)
+	}
+	frontendConfig, err := server.Registry.GetServiceConfiguration(project.ID, frontendService.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frontendConfig.Revision != 1 || len(frontendConfig.Bindings) != 1 || frontendConfig.Bindings[0].Path != "/hubs/notifications" {
+		t.Fatalf("frontend configuration=%+v", frontendConfig)
+	}
+}
+
 func TestProvisioningWaitsForStableResourceBindings(t *testing.T) {
 	bindings := []resourcev1.Binding{
 		{ID: "rbind-ready", LogicalName: "redis", Lifecycle: resourcev1.LifecycleReady},
@@ -558,6 +603,7 @@ func TestDuplicateActiveBuildDispatchRemainsPending(t *testing.T) {
 	server.BuildJobs = buildjob.Service{
 		Store: store, Sources: existingBuildSource{}, Repository: existingBuildRepository{}, Dispatcher: existingBuildDispatcher{},
 		Executor: buildjob.ExecutorConfig{Owner: "opsi", Repository: "executor", Workflow: ".github/workflows/build.yml", Ref: "refs/heads/main"},
+		Now:      func() time.Time { return now },
 	}
 	result, err := (deploymentWorkflowExecutor{server: server}).build(t.Context(), run)
 	if err != nil || !result.Pending || result.FailureCode != "" || len(result.Refs.IDs(deploymentworkflow.AuthorityBuildJob)) != 1 {
@@ -772,7 +818,7 @@ func TestScopedReanalysisKeepsExactSHAAndPersistsScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	initial := repositoryanalysis.Result{SchemaVersion: repositoryanalysis.SchemaVersion, RepositoryID: repository.RepositoryID, Repository: repository.FullName, SelectedRef: "main", CommitSHA: sha, Applications: []repositoryanalysis.Application{{SourceKey: "old", Key: "repo-old", Root: ".", Port: 8080, Build: repositoryanalysis.Build{Context: ".", DockerfilePath: "Dockerfile", Strategy: "dockerfile", Platform: "linux/amd64"}}}}
-	run, err = server.DeploymentRuns.SetAnalysis(context.Background(), project.ID, run.ID, initial, deploymentworkflow.AuthorityRevisions{SourceCommitSHA: sha}, run.Plan.Target)
+	run, err = server.DeploymentRuns.SetAnalysis(context.Background(), project.ID, run.ID, initial, deploymentworkflow.AuthorityRevisions{SourceCommitSHA: sha}, run.Plan.Target, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -837,7 +883,7 @@ func TestRepositoryExportAPIRolesAndProjectBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	analysis := repositoryanalysis.Result{SchemaVersion: repositoryanalysis.SchemaVersion, RepositoryID: repository.RepositoryID, Repository: repository.FullName, SelectedRef: "main", CommitSHA: sha, Applications: []repositoryanalysis.Application{{SourceKey: "api", Key: "repo-api", Root: ".", Port: 8080, Build: repositoryanalysis.Build{Context: ".", DockerfilePath: "Dockerfile", Strategy: "dockerfile", Platform: "linux/amd64"}}}}
-	run, err = server.DeploymentRuns.SetAnalysis(context.Background(), projectA.ID, run.ID, analysis, deploymentworkflow.AuthorityRevisions{SourceCommitSHA: sha}, run.Plan.Target)
+	run, err = server.DeploymentRuns.SetAnalysis(context.Background(), projectA.ID, run.ID, analysis, deploymentworkflow.AuthorityRevisions{SourceCommitSHA: sha}, run.Plan.Target, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -892,10 +938,10 @@ func TestDeploymentPlanUpdateRequiresExactRevisionAndReplaysSemantically(t *test
 		Applications: []repositoryanalysis.Application{{
 			SourceKey: "api", Key: "repo-api", Name: "api", Root: ".", Port: 8080,
 			Environment: map[string]string{"PORT": "8080"},
-			Build: repositoryanalysis.Build{Context: ".", Strategy: "dockerfile", DockerfilePath: "Dockerfile", Platform: "linux/amd64"},
+			Build:       repositoryanalysis.Build{Context: ".", Strategy: "dockerfile", DockerfilePath: "Dockerfile", Platform: "linux/amd64"},
 		}},
 	}
-	run, err = server.DeploymentRuns.SetAnalysis(context.Background(), project.ID, run.ID, analysis, deploymentworkflow.AuthorityRevisions{SourceCommitSHA: analysis.CommitSHA}, run.Plan.Target)
+	run, err = server.DeploymentRuns.SetAnalysis(context.Background(), project.ID, run.ID, analysis, deploymentworkflow.AuthorityRevisions{SourceCommitSHA: analysis.CommitSHA}, run.Plan.Target, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -973,14 +1019,14 @@ func TestResourceRecommendationEndpoint(t *testing.T) {
 		Applications: []repositoryanalysis.Application{{
 			SourceKey: "web", Key: "web", Name: "web", Root: ".", Port: 8080,
 			Environment: map[string]string{"PORT": "8080"},
-			Capacity: repositoryanalysis.Capacity{Replicas: 1, CPUMilli: 100, MemoryBytes: 128 << 20},
-			Build:    repositoryanalysis.Build{Context: ".", Strategy: "dockerfile", DockerfilePath: "Dockerfile", Platform: "linux/amd64"},
+			Capacity:    repositoryanalysis.Capacity{Replicas: 1, CPUMilli: 100, MemoryBytes: 128 << 20},
+			Build:       repositoryanalysis.Build{Context: ".", Strategy: "dockerfile", DockerfilePath: "Dockerfile", Platform: "linux/amd64"},
 		}},
 		Resources: []repositoryanalysis.Resource{{
 			LogicalName: "redis", Type: "redis", Managed: true, Required: true,
 		}},
 	}
-	run, err = server.DeploymentRuns.SetAnalysis(context.Background(), project.ID, run.ID, analysis, deploymentworkflow.AuthorityRevisions{SourceCommitSHA: analysis.CommitSHA}, run.Plan.Target)
+	run, err = server.DeploymentRuns.SetAnalysis(context.Background(), project.ID, run.ID, analysis, deploymentworkflow.AuthorityRevisions{SourceCommitSHA: analysis.CommitSHA}, run.Plan.Target, false)
 	if err != nil {
 		t.Fatal(err)
 	}

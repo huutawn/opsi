@@ -122,7 +122,7 @@ func TestRenderPreservesConnectionTemplateWhitespace(t *testing.T) {
 
 func TestRenderRejectsUnsupportedManagedProtocolWithoutMappings(t *testing.T) {
 	run := exportRun(t)
-	run.Plan.Dependencies = []repositoryanalysis.Dependency{{From: "repo-api", To: "database", Protocol: "kafka", Required: false}}
+	run.Plan.Dependencies = []repositoryanalysis.Dependency{{From: "repo-api", To: "database", Protocol: "cassandra", Required: false}}
 	run.Plan.Hash, _ = deploymentworkflow.HashPlan(run.Plan)
 	if _, err := Render(run.Plan); err == nil {
 		t.Fatal("unsupported managed protocol was exported")

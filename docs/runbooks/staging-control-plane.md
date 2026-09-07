@@ -97,8 +97,7 @@ Compose backend. The Cloudflare-facing origin connection is separately
 protected by Caddy TLS.
 
 Place the GitHub App private key at
-`secrets/github-app-private-key.pem` and the pinned SSH host keys at
-`secrets/ssh_known_hosts`. Each file must be non-empty, non-symlinked, and not
+`secrets/github-app-private-key.pem`. The file must be non-empty, non-symlinked, and not
 group/world writable. The same Bootstrap Worker token file is mounted read-only
 into Cloud and Worker; no token is duplicated into JSON.
 
@@ -120,7 +119,7 @@ chown 1000:1000 config/cloud.json config/bootstrap-worker.json
 chown 1000:1000 secrets/database-url secrets/smtp-password secrets/alerts-internal-token
 chown 1000:1000 secrets/bootstrap-worker-token secrets/bootstrap-secret-key
 chown 1000:1000 secrets/github-app-client-secret secrets/github-app-private-key.pem
-chown 1000:1000 secrets/github-app-webhook-secret secrets/ssh_known_hosts
+chown 1000:1000 secrets/github-app-webhook-secret
 chmod 0600 secrets/*
 ```
 
