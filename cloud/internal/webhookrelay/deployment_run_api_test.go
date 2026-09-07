@@ -818,7 +818,7 @@ func TestScopedReanalysisKeepsExactSHAAndPersistsScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	initial := repositoryanalysis.Result{SchemaVersion: repositoryanalysis.SchemaVersion, RepositoryID: repository.RepositoryID, Repository: repository.FullName, SelectedRef: "main", CommitSHA: sha, Applications: []repositoryanalysis.Application{{SourceKey: "old", Key: "repo-old", Root: ".", Port: 8080, Build: repositoryanalysis.Build{Context: ".", DockerfilePath: "Dockerfile", Strategy: "dockerfile", Platform: "linux/amd64"}}}}
-	run, err = server.DeploymentRuns.SetAnalysis(context.Background(), project.ID, run.ID, initial, deploymentworkflow.AuthorityRevisions{SourceCommitSHA: sha}, run.Plan.Target)
+	run, err = server.DeploymentRuns.SetAnalysis(context.Background(), project.ID, run.ID, initial, deploymentworkflow.AuthorityRevisions{SourceCommitSHA: sha}, run.Plan.Target, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -883,7 +883,7 @@ func TestRepositoryExportAPIRolesAndProjectBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	analysis := repositoryanalysis.Result{SchemaVersion: repositoryanalysis.SchemaVersion, RepositoryID: repository.RepositoryID, Repository: repository.FullName, SelectedRef: "main", CommitSHA: sha, Applications: []repositoryanalysis.Application{{SourceKey: "api", Key: "repo-api", Root: ".", Port: 8080, Build: repositoryanalysis.Build{Context: ".", DockerfilePath: "Dockerfile", Strategy: "dockerfile", Platform: "linux/amd64"}}}}
-	run, err = server.DeploymentRuns.SetAnalysis(context.Background(), projectA.ID, run.ID, analysis, deploymentworkflow.AuthorityRevisions{SourceCommitSHA: sha}, run.Plan.Target)
+	run, err = server.DeploymentRuns.SetAnalysis(context.Background(), projectA.ID, run.ID, analysis, deploymentworkflow.AuthorityRevisions{SourceCommitSHA: sha}, run.Plan.Target, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -941,7 +941,7 @@ func TestDeploymentPlanUpdateRequiresExactRevisionAndReplaysSemantically(t *test
 			Build:       repositoryanalysis.Build{Context: ".", Strategy: "dockerfile", DockerfilePath: "Dockerfile", Platform: "linux/amd64"},
 		}},
 	}
-	run, err = server.DeploymentRuns.SetAnalysis(context.Background(), project.ID, run.ID, analysis, deploymentworkflow.AuthorityRevisions{SourceCommitSHA: analysis.CommitSHA}, run.Plan.Target)
+	run, err = server.DeploymentRuns.SetAnalysis(context.Background(), project.ID, run.ID, analysis, deploymentworkflow.AuthorityRevisions{SourceCommitSHA: analysis.CommitSHA}, run.Plan.Target, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1026,7 +1026,7 @@ func TestResourceRecommendationEndpoint(t *testing.T) {
 			LogicalName: "redis", Type: "redis", Managed: true, Required: true,
 		}},
 	}
-	run, err = server.DeploymentRuns.SetAnalysis(context.Background(), project.ID, run.ID, analysis, deploymentworkflow.AuthorityRevisions{SourceCommitSHA: analysis.CommitSHA}, run.Plan.Target)
+	run, err = server.DeploymentRuns.SetAnalysis(context.Background(), project.ID, run.ID, analysis, deploymentworkflow.AuthorityRevisions{SourceCommitSHA: analysis.CommitSHA}, run.Plan.Target, false)
 	if err != nil {
 		t.Fatal(err)
 	}

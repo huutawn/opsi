@@ -642,6 +642,7 @@ func TestKafkaTopicInitializersMergeApplicationDependencyMappings(t *testing.T) 
     build: {context: api, dockerfile: Dockerfile}
     depends_on: [kafka-init-reminder, kafka-init-notifications]
     environment:
+      Kafka__Enabled: true
       Kafka__BootstrapServers: kafka:9092
       Kafka__SecurityProtocol: PLAINTEXT
 `,
@@ -668,6 +669,25 @@ func TestKafkaTopicInitializersMergeApplicationDependencyMappings(t *testing.T) 
 		if !seen[name] {
 			t.Fatalf("missing Kafka mapping %s in %+v", name, kafkaDependencies[0].Injections)
 		}
+	}
+	foundAPI := false
+	for _, application := range result.Applications {
+		if application.SourceKey != "api" {
+			continue
+		}
+		foundAPI = true
+		if _, exists := application.Environment["Kafka__BootstrapServers"]; exists {
+			t.Fatalf("managed Kafka bootstrap key must not also be a plain environment value: %+v", application.Environment)
+		}
+		if _, exists := application.Environment["Kafka__SecurityProtocol"]; exists {
+			t.Fatalf("managed Kafka connection keys must not also be plain environment values: %+v", application.Environment)
+		}
+		if application.Environment["Kafka__Enabled"] != "true" {
+			t.Fatalf("application-owned Kafka setting was unexpectedly removed: %+v", application.Environment)
+		}
+	}
+	if !foundAPI {
+		t.Fatal("API application was not detected")
 	}
 }
 

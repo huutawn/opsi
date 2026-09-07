@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/repositoryanalysis"
+	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 )
 
 type Error struct {
@@ -44,7 +45,7 @@ func (s Service) Create(ctx context.Context, projectID, actor, key string, sourc
 	return s.Store.Create(ctx, run, event, key)
 }
 
-func (s Service) SetAnalysis(ctx context.Context, projectID, runID string, analysis repositoryanalysis.Result, authority AuthorityRevisions, target Target) (Run, error) {
+func (s Service) SetAnalysis(ctx context.Context, projectID, runID string, analysis repositoryanalysis.Result, authority AuthorityRevisions, target Target, preserveReview bool) (Run, error) {
 	run, err := s.Get(ctx, projectID, runID)
 	if err != nil {
 		return Run{}, err
@@ -55,6 +56,8 @@ func (s Service) SetAnalysis(ctx context.Context, projectID, runID string, analy
 	if analysis.RepositoryID != run.Plan.Source.RepositoryID || analysis.Repository != run.Plan.Source.Repository || analysis.SelectedRef != run.Plan.Source.SelectedRef || len(analysis.CommitSHA) != 40 {
 		return Run{}, invalid("DEPLOYMENT_ANALYSIS_SOURCE_MISMATCH", "Repository analysis does not match the selected source.")
 	}
+	previousPlan := run.Plan
+	preserveReview = preserveReview && previousPlan.Source.CommitSHA == analysis.CommitSHA && previousPlan.AnalysisScopeHash == analysis.ScopeHash
 	run.Analysis = analysis
 	run.Plan.Source.CommitSHA = analysis.CommitSHA
 	run.Plan.Applications = analysis.Applications
@@ -69,6 +72,9 @@ func (s Service) SetAnalysis(ctx context.Context, projectID, runID string, analy
 	run.Plan.TruncationReason = analysis.TruncationReason
 	run.Plan.Authority = authority
 	run.Plan.Target = target
+	if preserveReview {
+		preserveReviewedPlan(previousPlan, &run.Plan)
+	}
 	run.Plan.Issues = reconcileDraftIssues(run.Plan)
 	run.State = StateAwaitingApproval
 	for _, issue := range run.Plan.Issues {
@@ -95,6 +101,77 @@ func (s Service) SetAnalysis(ctx context.Context, projectID, runID string, analy
 		message = "Repository analysis requires input before approval."
 	}
 	return s.save(ctx, run, message, nil)
+}
+
+// preserveReviewedPlan carries only user-reviewable decisions across a
+// same-commit, same-scope analysis refresh. Detection remains authoritative
+// for repository facts, while a topology refresh cannot resurrect a mapping
+// the reviewer removed or erase an acknowledgement they made.
+func preserveReviewedPlan(previous Plan, next *Plan) {
+	applications := make(map[string]repositoryanalysis.Application, len(previous.Applications))
+	for _, application := range previous.Applications {
+		applications[application.SourceKey] = application
+	}
+	for index := range next.Applications {
+		reviewed, ok := applications[next.Applications[index].SourceKey]
+		if !ok || reviewed.Key != next.Applications[index].Key {
+			continue
+		}
+		next.Applications[index].Environment = cloneStringMap(reviewed.Environment)
+		next.Applications[index].Capacity = reviewed.Capacity
+	}
+	resources := make(map[string]repositoryanalysis.Resource, len(previous.Resources))
+	for _, resource := range previous.Resources {
+		resources[resource.Type+"\x00"+resource.LogicalName] = resource
+	}
+	for index := range next.Resources {
+		reviewed, ok := resources[next.Resources[index].Type+"\x00"+next.Resources[index].LogicalName]
+		if !ok {
+			continue
+		}
+		next.Resources[index].Managed = reviewed.Managed
+		next.Resources[index].Required = reviewed.Required
+		next.Resources[index].Persistence = clonePersistence(reviewed.Persistence)
+		next.Resources[index].Settings = cloneStringMap(reviewed.Settings)
+		next.Resources[index].Topics = append([]resourcev1.KafkaTopic(nil), reviewed.Topics...)
+		next.Resources[index].Acknowledgements = append([]string(nil), reviewed.Acknowledgements...)
+	}
+	dependencies := make(map[string]repositoryanalysis.Dependency, len(previous.Dependencies))
+	for _, dependency := range previous.Dependencies {
+		dependencies[reviewedDependencyKey(dependency)] = dependency
+	}
+	for index := range next.Dependencies {
+		if reviewed, ok := dependencies[reviewedDependencyKey(next.Dependencies[index])]; ok {
+			next.Dependencies[index].Injections = append([]repositoryanalysis.Injection(nil), reviewed.Injections...)
+		}
+	}
+	next.Secrets = append([]repositoryanalysis.Secret(nil), previous.Secrets...)
+	next.ApplicationEnvironmentReviews = append([]ApplicationEnvironmentReview(nil), previous.ApplicationEnvironmentReviews...)
+	next.FailurePolicy = previous.FailurePolicy
+	repositoryanalysis.RemoveManagedDependencyEnvironmentKeys(next.Applications, next.Dependencies)
+}
+
+func reviewedDependencyKey(dependency repositoryanalysis.Dependency) string {
+	return dependency.From + "\x00" + dependency.To + "\x00" + dependency.Protocol + "\x00" + dependency.Strategy + "\x00" + dependency.Path
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	clone := make(map[string]string, len(values))
+	for key, value := range values {
+		clone[key] = value
+	}
+	return clone
+}
+
+func clonePersistence(value *repositoryanalysis.Persistence) *repositoryanalysis.Persistence {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
 }
 
 func (s Service) UpdatePlan(ctx context.Context, projectID, runID, actor, expectedHash string, draft Plan) (Run, error) {

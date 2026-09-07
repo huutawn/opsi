@@ -237,7 +237,7 @@ export function DeployView({ console }: { console: ConsoleController }) {
 				const facts = await client.placementFacts(projectID);
 				if (!targetResume.current && facts.runtimes.some((runtime) => runtime.status === "ready")) {
 					targetResume.current = true;
-					const resumed = await mutate("analyze", () => client.deploymentRunAction(projectID, run.id, "analyze", {}, crypto.randomUUID()));
+					const resumed = await mutate("analyze", () => client.deploymentRunAction(projectID, run.id, "analyze", { preserve_review: true }, crypto.randomUUID()));
 					if (!resumed) targetResume.current = false;
 					else void loadRecommendation(true);
 				}

@@ -553,6 +553,7 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 			deps = append(deps, dependency)
 		}
 	}
+	RemoveManagedDependencyEnvironmentKeys(apps, deps)
 	if kafkaDisabled {
 		for i := range resources {
 			if resources[i].Type == "kafka" {
