@@ -237,7 +237,16 @@ export function DeployView({ console }: { console: ConsoleController }) {
 				const facts = await client.placementFacts(projectID);
 				if (!targetResume.current && facts.runtimes.some((runtime) => runtime.status === "ready")) {
 					targetResume.current = true;
-					const resumed = await mutate("analyze", () => client.deploymentRunAction(projectID, run.id, "analyze", { preserve_review: true }, crypto.randomUUID()));
+					let currentRun = run;
+					if (draftPlan && JSON.stringify(draftPlan) !== JSON.stringify(run.plan)) {
+						const saved = await mutate("plan", () => client.updateDeploymentPlan(projectID, run.id, run.revision, run.plan.hash, draftPlan, crypto.randomUUID()));
+						if (!saved) {
+							targetResume.current = false;
+							return;
+						}
+						currentRun = saved;
+					}
+					const resumed = await mutate("analyze", () => client.deploymentRunAction(projectID, currentRun.id, "analyze", { preserve_review: true }, crypto.randomUUID()));
 					if (!resumed) targetResume.current = false;
 					else void loadRecommendation(true);
 				}
@@ -247,7 +256,7 @@ export function DeployView({ console }: { console: ConsoleController }) {
 		void inspect();
 		const timer = window.setInterval(() => void inspect(), 2500);
 		return () => window.clearInterval(timer);
-	}, [bootstrapSession?.id, canMutate, client, needsServer, projectID, run?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+	}, [bootstrapSession?.id, canMutate, client, draftPlan, needsServer, projectID, run]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (loadFailure && !run && runs.length === 0) return <DeployLoadFailure busy={busy} failure={loadFailure} onLogin={() => void login(setLoadFailure)} onRetry={() => void load(true)} projectName={console.state.project?.name} />;
   const sourceOnly = showNew || !run;

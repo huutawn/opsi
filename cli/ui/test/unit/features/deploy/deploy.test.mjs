@@ -40,7 +40,8 @@ test("Target reuses canonical bootstrap and resumes analysis when a runtime beco
 	assert.match(source, /Boolean\(action\)\s*&&\s*busy\s*===\s*action/);
   assert.match(source, /client\.placementFacts/);
   assert.match(source, /runtime\.status === "ready"/);
-  assert.match(source, /deploymentRunAction\(projectID, run\.id, "analyze"/);
+	assert.match(source, /client\.updateDeploymentPlan\(projectID, run\.id, run\.revision, run\.plan\.hash, draftPlan/);
+	assert.match(source, /deploymentRunAction\(projectID, currentRun\.id, "analyze"/);
 	assert.match(source, /preserve_review:\s*true/);
   assert.match(source, /bootstrapActive\s*=\s*Boolean\(needsServer\s*&&\s*bootstrapSession/);
 });
