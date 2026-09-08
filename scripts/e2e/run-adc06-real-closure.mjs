@@ -153,8 +153,8 @@ mirrors:
   const apiBin = path.join(WORK_DIR, "adc02-consumer");
   const webBin = path.join(WORK_DIR, "adc06-web");
 
-  execSync(`CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "${apiBin}" ./cloud/integration/fixtures/adc02-consumer`, { cwd: ROOT, stdio: "pipe" });
-  execSync(`CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "${webBin}" ./cloud/integration/fixtures/adc06-web`, { cwd: ROOT, stdio: "pipe" });
+  execSync(`CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "${apiBin}" ./test/fixtures/cloud/adc02-consumer`, { cwd: ROOT, stdio: "pipe" });
+  execSync(`CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "${webBin}" ./test/fixtures/cloud/adc06-web`, { cwd: ROOT, stdio: "pipe" });
 
   const apiDockerfile = path.join(WORK_DIR, "Dockerfile.api");
   fs.writeFileSync(apiDockerfile, `FROM scratch\nCOPY adc02-consumer /adc02-consumer\nEXPOSE 8080\nENTRYPOINT ["/adc02-consumer"]\n`);

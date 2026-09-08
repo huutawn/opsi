@@ -194,18 +194,18 @@ curl -fsS -X POST "$cloud_url/v1/agents/$cloud_node_id/heartbeat?project_id=$clo
 	--data '{"version":"test","k3s_status":"ready","node_ready":true,"capacity":{"cpu_cores":4,"memory_mb":8192,"disk_total_gb":80},"capabilities":{"managed_resources":true,"postgres_logical_backup":true,"postgres_logical_restore":true}}' >/dev/null
 printf 'cloud_restore_authority=PASS\n'
 
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$work_dir/fixture/p07b2-application" ./agent/integration/fixtures/p07b2-application
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$work_dir/fixture/p07b2-application" ./test/fixtures/agent/p07b2-application
 local_image="${registry_host}/opsi/p07b2-acceptance:fixture-${suffix}"
-docker build -q -f agent/integration/fixtures/p07b2-application/Dockerfile -t "$local_image" "$work_dir/fixture" >/dev/null
+docker build -q -f test/fixtures/agent/p07b2-application/Dockerfile -t "$local_image" "$work_dir/fixture" >/dev/null
 printf '%s' "$password" | docker login "$registry_host" --username "$username" --password-stdin >/dev/null
 docker push "$local_image" >/dev/null || { echo 'fixture push failed' >&2; exit 1; }
-(cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$work_dir/postgres-fixture/p07b3b1-application" ./integration/fixtures/p07b3b1-application)
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$work_dir/postgres-fixture/p07b3b1-application" ./test/fixtures/cloud/p07b3b1-application
 postgres_image="${registry_host}/opsi/p07b3b1-acceptance:fixture-${suffix}"
-docker build -q -f cloud/integration/fixtures/p07b3b1-application/Dockerfile -t "$postgres_image" "$work_dir/postgres-fixture" >/dev/null
+docker build -q -f test/fixtures/cloud/p07b3b1-application/Dockerfile -t "$postgres_image" "$work_dir/postgres-fixture" >/dev/null
 docker push "$postgres_image" >/dev/null || { echo 'PostgreSQL fixture push failed' >&2; exit 1; }
-(cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$work_dir/adc02-fixture/adc02-consumer" ./integration/fixtures/adc02-consumer)
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$work_dir/adc02-fixture/adc02-consumer" ./test/fixtures/cloud/adc02-consumer
 adc02_image="${registry_host}/opsi/adc02-acceptance:fixture-${suffix}"
-docker build -q -f cloud/integration/fixtures/adc02-consumer/Dockerfile -t "$adc02_image" "$work_dir/adc02-fixture" >/dev/null
+docker build -q -f test/fixtures/cloud/adc02-consumer/Dockerfile -t "$adc02_image" "$work_dir/adc02-fixture" >/dev/null
 docker push "$adc02_image" >/dev/null || { echo 'ADC02 consumer fixture push failed' >&2; exit 1; }
 docker pull nginx:1.27-alpine >/dev/null
 generic_image="${registry_host}/opsi/e2e:seed"

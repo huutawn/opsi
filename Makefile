@@ -19,7 +19,7 @@ DEV_CONTROL_PLANE_EXAMPLE_COMPOSE := docker compose --env-file deploy/dev-contro
 STAGING_CONTROL_PLANE_COMPOSE := docker compose --env-file deploy/staging-control-plane/.env -f deploy/staging-control-plane/compose.yaml
 STAGING_CONTROL_PLANE_EXAMPLE_COMPOSE := docker compose --env-file deploy/staging-control-plane/.env.example -f deploy/staging-control-plane/compose.yaml
 
-.PHONY: check-toolchain verify test verify-postgres verify-postgres-binding-e2e verify-buildpacks-e2e build build-cli-release verify-cli-release verify-cli-installer verify-cli-clean-install agent-release verify-agent-release verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck verify-dev-control-plane-preflight verify-dev-control-plane-clean-vm verify-r5-005-github-app-preflight verify-bootstrap-worker-release ui-build ui-test ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate-source dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down verify-staging-control-plane-policy verify-staging-control-plane-caddy-smoke staging-control-plane-validate-source staging-control-plane-validate staging-control-plane-up staging-control-plane-down
+.PHONY: check-toolchain verify test test-go-unit test-ui-unit test-ui-e2e test-postgres-integration test-buildpacks-integration test-e2e-k3s test-e2e-k3s-preflight test-e2e-k3s-selfcheck test-e2e-private-registry test-e2e-node-lifecycle test-e2e-node-lifecycle-preflight test-e2e-node-lifecycle-selfcheck test-e2e-dev-control-plane-preflight test-e2e-dev-control-plane verify-postgres verify-postgres-binding-e2e verify-buildpacks-e2e build build-cli-release verify-cli-release verify-cli-installer verify-cli-clean-install agent-release verify-agent-release verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck verify-dev-control-plane-preflight verify-dev-control-plane-clean-vm verify-r5-005-github-app-preflight verify-bootstrap-worker-release ui-build ui-test ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate-source dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down verify-staging-control-plane-policy verify-staging-control-plane-caddy-smoke staging-control-plane-validate-source staging-control-plane-validate staging-control-plane-up staging-control-plane-down
 
 check-toolchain:
 	@go version | grep -q "go$(GO_VERSION)" || { echo "Go $(GO_VERSION) required"; go version; exit 1; }
@@ -42,6 +42,36 @@ test:
 	cd agent && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./...
 	cd cli && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./cmd/... ./internal/...
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./...
+	cd test && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./...
+
+test-go-unit: test
+
+test-ui-unit: ui-test
+
+test-ui-e2e:
+	cd cli/ui && $(RUN) npx playwright test
+
+test-postgres-integration: verify-postgres
+
+test-buildpacks-integration: verify-buildpacks-e2e
+
+test-e2e-k3s: verify-e2e-k3s
+
+test-e2e-k3s-preflight: verify-e2e-k3s-preflight
+
+test-e2e-k3s-selfcheck: verify-e2e-k3s-selfcheck
+
+test-e2e-private-registry: verify-private-registry-e2e
+
+test-e2e-node-lifecycle: verify-e2e-node-lifecycle
+
+test-e2e-node-lifecycle-preflight: verify-e2e-node-lifecycle-preflight
+
+test-e2e-node-lifecycle-selfcheck: verify-e2e-node-lifecycle-selfcheck
+
+test-e2e-dev-control-plane-preflight: verify-dev-control-plane-preflight
+
+test-e2e-dev-control-plane: verify-dev-control-plane-clean-vm
 
 verify-postgres:
 	@set -eu; \
@@ -169,7 +199,7 @@ lint:
 	cd cli && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go vet ./cmd/... ./internal/...
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go vet ./...
 	cd contracts/go && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go vet ./...
-
+	cd test && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go vet ./...
 source-hygiene: verify-source-package-policy verify-bootstrap-worker-release verify-agent-release
 	$(RUN) ./scripts/source-package.sh check-tree
 	@if sed -n '/func (s \*Service) expireDeploymentLeasesLocked/,/^}/p' cloud/internal/registry/service.go | rg -n 'delete\(s\.deployLocks'; then echo "canonical lease exhaustion deletes service ownership"; exit 1; fi
