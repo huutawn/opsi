@@ -5,4 +5,5 @@ use (
 	./cli
 	./cloud
 	./contracts/go
+	./test
 )

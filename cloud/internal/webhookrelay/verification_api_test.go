@@ -748,7 +748,7 @@ func TestAssertionAuthenticityWithRealConsumerFixtureHandlers(t *testing.T) {
 	f := setupVerificationFixture(t)
 	ctx := context.Background()
 
-	// Simulate actual consumer fixture HTTP handler (same behavior as cloud/integration/fixtures/adc02-consumer/main.go)
+	// Simulate actual consumer fixture HTTP handler (same behavior as test/fixtures/cloud/adc02-consumer/main.go)
 	consumerMux := http.NewServeMux()
 	consumerMux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
